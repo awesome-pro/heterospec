@@ -1,0 +1,27 @@
+{
+  "_comment": "Pinned SGLang revision for HeteroSpec experiments. Every serious run records this commit. Upstream moves ~every 30 min; we re-sync deliberately between GPU sessions, never during one.",
+  "repo": "https://github.com/sgl-project/sglang",
+  "fork": "https://github.com/awesome-pro/sglang",
+  "base_commit": "66ce8c55cc6c656225d33f26bbcaeeac8ba92e93",
+  "base_commit_short": "66ce8c55cc",
+  "base_commit_date": "2026-09-23T13:56:24+08:00",
+  "base_commit_subject": "[HiCache] ci: add HiCache and unified radix rerun group (#40831)",
+  "fork_base_branch": "heterospec/base",
+  "work_branches": {
+    "telemetry": "heterospec/iter-telemetry",
+    "policy": "heterospec/request-aware-policy"
+  },
+  "relevant_upstream_prs": {
+    "21599": "adaptive speculative decoding (merged, evolved since)",
+    "24055": "adaptive runtime-state switching (merged, evolved since)",
+    "23994": "adaptive step 0 support (merged)",
+    "27493": "init adaptive spec params from config (merged)",
+    "37274": "allow custom policy for adaptive speculative decoding (merged) -- our extension point",
+    "28045": "cost-aware policy (NOT MERGED -- do not call this the SGLang baseline)"
+  },
+  "verified_at": "2026-09-23T11:30:00+05:30",
+  "notes": [
+    "Only 1 of the 33 commits between the original fork HEAD (720617bb5) and this base touched python/sglang/srt/speculative/ (deprecated env-var removal in spec_info.py/spec_registry.py), so the Phase 1 audit remains valid at this commit.",
+    "adaptive_unsupported_reason() permits adaptive mode only for EAGLE/EAGLE3 with speculative_eagle_topk=1, no DP attention, no multi-layer EAGLE, no two-batch overlap, no pdmux."
+  ]
+}

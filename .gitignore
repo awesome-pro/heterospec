@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Results: keep the directory, drop the payloads.
+# Structured experiment output is large and machine-specific; see results/README.md
+results/**
+!results/README.md
+!results/.gitkeep
+
+# Model / trace caches
+.cache/
+*.gguf
+*.safetensors
+
+# Local secrets (RunPod keys, HF tokens)
+.env
+.env.*
+!.env.example
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
