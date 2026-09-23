@@ -176,6 +176,41 @@ _COMPILED: dict[str, list[re.Pattern[str]]] = {
 }
 
 
+#: Sampling keys the pinned SGLang's ``SamplingParams`` accepts.
+#:
+#: The mock validates against this because the real server builds
+#: ``SamplingParams(**sampling_kwargs)`` and raises ``TypeError: Unexpected
+#: keyword argument 'X'`` for anything else -- surfacing as HTTP 500 on every
+#: request. Nothing caught that locally for 400+ tests, because the mock accepted
+#: whatever it was sent, and the failure only appeared on a rented GPU. Keep this
+#: list in step with sglang/srt/sampling/sampling_params.py.
+VALID_SAMPLING_KEYS = frozenset(
+    {
+        "max_new_tokens",
+        "stop",
+        "stop_token_ids",
+        "stop_regex",
+        "temperature",
+        "top_p",
+        "top_k",
+        "min_p",
+        "frequency_penalty",
+        "presence_penalty",
+        "repetition_penalty",
+        "min_new_tokens",
+        "n",
+        "ignore_eos",
+        "skip_special_tokens",
+        "spaces_between_special_tokens",
+        "no_stop_trim",
+        "stream_interval",
+        "logit_bias",
+        "sampling_seed",
+        "custom_params",
+    }
+)
+
+
 def _classify(prompt: str) -> str:
     """Infer a prompt class from its text by weighted keyword scoring.
 
@@ -279,6 +314,21 @@ class _Handler(BaseHTTPRequestHandler):
         prompt = req.get("text") or ""
         rid = req.get("rid") or f"mock-{next(srv.counter)}"  # type: ignore[attr-defined]
         sampling = req.get("sampling_params") or {}
+        unknown = sorted(set(sampling) - VALID_SAMPLING_KEYS)
+        if unknown:
+            # Mirror the real server: it does not ignore unknown sampling keys, it
+            # raises TypeError, which the client sees as an opaque HTTP 500.
+            self._send(
+                500,
+                {
+                    "error": (
+                        "TypeError: Unexpected keyword argument "
+                        f"'{unknown[0]}' (invalid sampling_params keys: {unknown}; "
+                        "seed is spelled 'sampling_seed')"
+                    )
+                },
+            )
+            return
         max_new_tokens = int(sampling.get("max_new_tokens") or 128)
 
         cls = _classify(prompt)

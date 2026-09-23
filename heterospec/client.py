@@ -237,7 +237,13 @@ class SGLangClient:
         if top_p is not None:
             sampling["top_p"] = top_p
         if seed is not None:
-            sampling["seed"] = seed
+            # SGLang's field is `sampling_seed`, NOT `seed`. The server builds
+            # SamplingParams(**sampling_kwargs) and raises
+            # "TypeError: Unexpected keyword argument 'seed'" for anything else,
+            # which surfaces to the client as a bare HTTP 500 -- one per request,
+            # while warm-up (which sends no seed) succeeds. See
+            # sglang/srt/sampling/sampling_params.py.
+            sampling["sampling_seed"] = seed
 
         payload: dict[str, Any] = {
             "text": prompt,

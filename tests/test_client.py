@@ -13,6 +13,7 @@ Two things matter here:
    only unknown left on the GPU is the hardware.
 """
 
+import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -416,3 +417,84 @@ class _one_shot_server:
         self.httpd.shutdown()
         self.httpd.server_close()
         self.thread.join(timeout=5)
+
+
+# ---------------------------------------------------------------------------
+# Request schema: the real server does not ignore unknown sampling keys
+# ---------------------------------------------------------------------------
+
+
+def test_sampling_params_use_only_field_names_the_server_accepts():
+    """The bug this pins cost a GPU session.
+
+    SGLang builds ``SamplingParams(**sampling_kwargs)``, so a key that is not a
+    field name raises ``TypeError`` -- which reaches the client as a bare
+    ``HTTP 500: Internal Server Error`` on every request. The harness sent
+    ``seed``; the field is ``sampling_seed``. Warm-up sends no seed, so it kept
+    succeeding while every measured request failed, which made it look like a
+    load or resource problem rather than a one-word payload bug.
+
+    Asserting the exact key set is what turns this from a $1 discovery into a
+    unit test.
+    """
+    from heterospec.mockserver import VALID_SAMPLING_KEYS
+
+    captured: dict = {}
+
+    class _FakeSession:
+        def post(self, url, json=None, timeout=None):  # noqa: A002
+            captured.update(json)
+            raise AssertionError("payload captured; no real request needed")
+
+    client = SGLangClient("http://127.0.0.1:1")
+    client._session = _FakeSession()  # type: ignore[assignment]
+    try:
+        client.generate(
+            "hello",
+            max_new_tokens=16,
+            temperature=0.0,
+            top_p=0.9,
+            seed=12345,
+            rid="r-00001",
+        )
+    except AssertionError:
+        pass
+
+    sampling = captured["sampling_params"]
+    unknown = sorted(set(sampling) - VALID_SAMPLING_KEYS)
+    assert not unknown, (
+        f"{unknown} are not SGLang SamplingParams fields; the server answers 500 "
+        f"for each request. `seed` must be sent as `sampling_seed`."
+    )
+    assert sampling["sampling_seed"] == 12345
+    assert "seed" not in sampling, "the field name is sampling_seed, not seed"
+
+
+def test_the_mock_rejects_an_unknown_sampling_key_like_the_real_server():
+    """Otherwise the mock silently accepts payloads the GPU host will reject.
+
+    This is the guard for the guard: if the mock goes back to accepting anything,
+    the schema test above can pass while the real server still 500s.
+    """
+    import urllib.error
+    import urllib.request
+
+    with MockSGLangServer(k=3, seed=0) as srv:
+        body = json.dumps(
+            {
+                "text": "hello",
+                "sampling_params": {"temperature": 0.0, "max_new_tokens": 4, "seed": 1},
+                "return_logprob": False,
+            }
+        ).encode()
+        req = urllib.request.Request(
+            f"{srv.base_url}/generate",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            urllib.request.urlopen(req, timeout=10)
+        assert exc.value.code == 500
+        detail = json.loads(exc.value.read())
+        assert "Unexpected keyword argument" in detail["error"]
+        assert "sampling_seed" in detail["error"]
