@@ -154,6 +154,13 @@ If it exits with **problems**, stop and send me the output — that is exactly w
 it is for, and every check it makes would otherwise have failed *after* you
 started paying.
 
+> **Now go straight to Phase 5. Do not stop the pod to "save money" in between.**
+> With no volume, stopping erases the container disk — the ~17.6 GB of weights, the
+> SGLang install, and the clones — so stopping means paying for the whole bootstrap
+> again. Phases 4 and 5 must run in one sitting. The session itself is only ~$1, so
+> there is nothing to save by pausing.
+
+
 > If it warns `torch ... != pinned 2.13.0` or `CUDA 12.x`, the image is wrong.
 > Tell me and I'll tell you whether to let pip fix it or re-deploy.
 
@@ -198,13 +205,21 @@ scp -r <pod-ssh-host>:/workspace/heterospec/results/session1 \
     ~/Desktop/heterospec/results/
 ```
 
-RunPod shows the exact SSH host and port under **Connect → SSH**, including the
-`-p <port>` you may need. It looks roughly like:
+> **Use the "SSH over exposed TCP" form, not the plain SSH one.** RunPod lists two
+> connections and they are not interchangeable: the proxy (`ssh.runpod.io`) is
+> explicitly marked *"No support for SCP or SFTP"*, so `scp` over it fails. Use the
+> direct TCP entry, which is marked *"Supports SCP & SFTP"*:
 
 ```bash
-scp -P <port> root@<host>:/workspace/heterospec/results/session1 \
+scp -P <port> -i ~/.ssh/id_ed25519 -r \
+    root@<public-ip>:/workspace/heterospec/results/session1 \
     ~/Desktop/heterospec/results/
 ```
+
+> Copy the exact host and port from **Connect → SSH over exposed TCP**. If you have
+> no SSH key registered, copy the results from inside the pod instead — e.g. tar
+> them and base64 them out through the web terminal, or push them to cloud storage
+> from the pod.
 
 **✅ Check:** on your Mac, this prints the files without error:
 
@@ -215,8 +230,12 @@ ls ~/Desktop/heterospec/results/session1/
 You should see `session1_report.json`, `cost_model.jsonl`, some
 `trace_*.jsonl`, and per-run directories.
 
-**Now stop the pod** in the RunPod console. Leave the **volume** — you will reuse
-it for Session 2.
+**Now stop the pod** in the RunPod console. There is nothing else to preserve:
+there is no volume, and the container disk is temporary by design.
+
+> **Do this in the right order.** Copy the results off *first*, then stop. The
+> overrides dialog states it plainly: *"Temporary storage that will be erased when
+> the Pod is stopped."* Stopping before the copy destroys the only copy of the run.
 
 ---
 
