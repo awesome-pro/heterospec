@@ -317,10 +317,20 @@ class RunMetadata:
         return bool((self.server.get("server_info") or {}).get("mock"))
 
     def to_dict(self) -> dict[str, Any]:
+        """Serializable metadata, with the derived verdicts surfaced.
+
+        `sglang_commit`, `sglang_dirty` and `is_mock` are properties, not
+        fields, so `asdict` would omit them. They are copied in explicitly:
+        reading metadata.json should not require unpacking `environment`.
+        """
         d = asdict(self)
         ok, reason = self.citable()
         d["citable"] = ok
         d["citable_reason"] = reason
+        d["sglang_commit"] = self.sglang_commit
+        d["sglang_dirty"] = self.sglang_dirty
+        d["is_mock"] = self.is_mock
+        d["commit_mismatch"] = self.commit_mismatch()
         return d
 
     @classmethod
