@@ -256,6 +256,21 @@ if [ "$CHECK_ONLY" = "1" ]; then
   fi
 else
   info "installing SGLang (editable) — this is the slow step, several minutes"
+  # Skip the Rust extensions. The crates in sglang/rust are sglang-grpc (the gRPC
+  # frontend) and sglang-mm (multimodal); `sglang_grpc` is imported nowhere under
+  # python/sglang/srt, and this session uses the HTTP API with EAGLE3 + triton.
+  # SGLang's own Dockerfile agrees: its runtime stage sets
+  # SGLANG_RUST_BUILD_MODE=never. Without this the build fails outright with
+  # "cargo is required to discover the Rust extension modules", and installing a
+  # toolchain would burn ~15 minutes of billed time compiling code the run never
+  # imports. `SGLANG_BUILD_RUST_EXTS=none` is the documented way to build nothing.
+  #
+  # No extras either: the Dockerfile's `.[all]` adds diffusion/http2/tracing,
+  # none of which this session uses, and the pinned lockfile at
+  # configs/env/sglang-py312-linux.lock was resolved from pyproject.toml without
+  # extras, so this matches the recorded environment.
+  export SGLANG_BUILD_RUST_EXTS="${SGLANG_BUILD_RUST_EXTS:-none}"
+  info "SGLANG_BUILD_RUST_EXTS=$SGLANG_BUILD_RUST_EXTS (gRPC/multimodal crates skipped)"
   if "$PYTHON" -m pip install --quiet -e "$SGLANG_DIR/python"; then
     ok "sglang installed"
   else
@@ -289,16 +304,62 @@ elif [ "$CHECK_ONLY" = "1" ]; then
     [ -d "$d" ] && ok "cached: $m" || warn "not in cache: $m"
   done
 else
-  "$PYTHON" -m pip install --quiet -U "huggingface_hub[cli]" || warn "could not update huggingface_hub"
+  "$PYTHON" -m pip install --quiet -U "huggingface_hub" || warn "could not update huggingface_hub"
   if command -v hf >/dev/null 2>&1; then DL=(hf download); else DL=(huggingface-cli download); fi
+
+  # Verify access BEFORE pulling 17 GB. A gated-model failure is a licence or a
+  # token-permission problem, and it takes the same three seconds to find either
+  # way -- as opposed to ten minutes of billed download that ends in a bare
+  # "download failed". Written to a helper file rather than `python -c` so the
+  # quoting stays readable.
+  if [ -n "${HF_TOKEN:-}" ]; then
+    cat > /tmp/ht_hfcheck.py <<'PYEOF'
+import os
+import sys
+
+from huggingface_hub import HfApi
+
+api = HfApi()
+token = os.environ.get("HF_TOKEN")
+try:
+    who = api.whoami(token=token)
+except Exception as e:  # noqa: BLE001
+    print(f"AUTH_FAILED: {type(e).__name__}: {e}")
+    print("  the token was rejected outright -- check it was copied whole and is not revoked")
+    sys.exit(4)
+print(f"authenticated as: {who.get('name', '?')} ({who.get('type', '?')})")
+try:
+    api.model_info(sys.argv[1], token=token)
+except Exception as e:  # noqa: BLE001
+    print(f"ACCESS_DENIED: {type(e).__name__}: {e}")
+    print("  the token is valid, but this account cannot see the model.")
+    print("  A 401/403 naming the licence means it has not been accepted on THIS account.")
+    sys.exit(5)
+print("gated-model access: OK")
+PYEOF
+    if "$PYTHON" /tmp/ht_hfcheck.py "$TARGET_MODEL" >/tmp/ht_hfcheck.log 2>&1; then
+      sed 's/^/       /' /tmp/ht_hfcheck.log
+      ok "HF token can access $TARGET_MODEL"
+    else
+      sed 's/^/       /' /tmp/ht_hfcheck.log
+      fail "HF token cannot access $TARGET_MODEL"
+      info "accept the licence at https://huggingface.co/$TARGET_MODEL"
+      info "then use a token from that SAME account (fine-grained tokens need read access to gated repos)"
+    fi
+  fi
+
   for m in "$TARGET_MODEL" "$DRAFT_MODEL"; do
     info "downloading $m (~17 GB total for both)"
-    if "${DL[@]}" "$m" >/dev/null 2>&1; then
+    dl_log="/tmp/ht_dl_$(printf '%s' "$m" | tr '/' '_').log"
+    if "${DL[@]}" "$m" >"$dl_log" 2>&1; then
       ok "downloaded $m"
     else
       fail "download failed for $m"
+      # Show the real reason. Swallowing it left the operator with "download
+      # failed ... export HF_TOKEN" even when the token was already set.
+      tail -n 6 "$dl_log" | sed 's/^/       /'
       case "$m" in
-        "$TARGET_MODEL") info "this model is gated: accept the licence and export HF_TOKEN" ;;
+        "$TARGET_MODEL") info "see the error above; the token/licence check is in step 4 above" ;;
       esac
     fi
   done
