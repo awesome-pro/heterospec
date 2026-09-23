@@ -150,8 +150,9 @@ Cost of the insurance: one command.
 
 The target model is **gated**: it will fail unless you have accepted the licence.
 
-1. Go to <https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct> and accept it
-   (do this in your browser, on your Mac — it is a one-time click).
+1. Go to <https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct> and **submit the
+   access request form** (first name, last name, date of birth, country,
+   affiliation, job title, licence checkbox).
 2. Create a token at <https://huggingface.co/settings/tokens>.
 3. On the pod:
 
@@ -164,6 +165,29 @@ export HF_TOKEN=hf_paste_your_token_here
 read from one cache instead of being re-fetched per launch.
 
 **✅ Check:** `echo $HF_TOKEN` prints your token.
+
+> **This model is `gated: manual`, which is stricter than "accept the licence".**
+> The HF API reports `"gated": "manual"` for
+> `meta-llama/Llama-3.1-8B-Instruct`, so **Meta must approve the request** before
+> any file can be downloaded. Submitting the form leaves it `PENDING` at
+> <https://huggingface.co/settings/gated-repos>; it is not granted instantly.
+>
+> Do the submission **before** renting a GPU, so the pod is not billing while you
+> wait. You can confirm access without downloading the weights:
+>
+> ```bash
+> python3 -c "
+> import tempfile
+> from huggingface_hub import hf_hub_download
+> with tempfile.TemporaryDirectory() as t:
+>     print('ACCESS OK:', hf_hub_download(
+>         'meta-llama/Llama-3.1-8B-Instruct', 'config.json', cache_dir=t))
+> "
+> ```
+>
+> A printed path means approved. A `GatedRepoError` means still pending — and note
+> that checking the *token* is not the same test: the token authenticates fine
+> while access is still pending.
 
 ---
 
