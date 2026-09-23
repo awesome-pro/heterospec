@@ -1,0 +1,85 @@
+{
+  "_comment": "Pinned target+draft pair. This is NOT a free experimental variable: PROJECT.md fixes the model so that request-level acceptance heterogeneity is measured rather than model novelty. Checkpoints are SGLang's own canonical EAGLE3 test defaults (python/sglang/test/test_utils.py:114-115), so the configuration is known-good upstream.",
+  "model": {
+    "target": "meta-llama/Llama-3.1-8B-Instruct",
+    "draft": "lmsys/sglang-EAGLE3-LLaMA3.1-Instruct-8B",
+    "dtype": "float16",
+    "attention_backend": "triton",
+    "mem_fraction_static": 0.7,
+    "cuda_graph_max_bs_decode": 64,
+    "cuda_graph_backend_prefill": "disabled",
+    "extra_args": []
+  },
+  "launches": [
+    {
+      "id": "no_spec",
+      "description": "Absolute target-only baseline. No draft model, no speculation.",
+      "spec": null
+    },
+    {
+      "id": "static_k1",
+      "description": "Shallow speculation, static K=1.",
+      "spec": {
+        "algorithm": "EAGLE3",
+        "num_steps": 1,
+        "num_draft_tokens": 2,
+        "eagle_topk": 1,
+        "adaptive": false
+      }
+    },
+    {
+      "id": "static_k3",
+      "description": "Medium speculation, static K=3.",
+      "spec": {
+        "algorithm": "EAGLE3",
+        "num_steps": 3,
+        "num_draft_tokens": 4,
+        "eagle_topk": 1,
+        "adaptive": false
+      }
+    },
+    {
+      "id": "static_k5",
+      "description": "Static K=5. Present because 5 is in the default adaptive ladder, so it is an adaptive target tier.",
+      "spec": {
+        "algorithm": "EAGLE3",
+        "num_steps": 5,
+        "num_draft_tokens": 6,
+        "eagle_topk": 1,
+        "adaptive": false
+      }
+    },
+    {
+      "id": "static_k7",
+      "description": "Aggressive speculation, static K=7.",
+      "spec": {
+        "algorithm": "EAGLE3",
+        "num_steps": 7,
+        "num_draft_tokens": 8,
+        "eagle_topk": 1,
+        "adaptive": false
+      }
+    },
+    {
+      "id": "sglang_adaptive",
+      "description": "Merged SGLang adaptive controller with the built-in default ladder ([1,3,5,7] at BS>=1). Initial steps 3 is a member of the ladder, so the slot keeps it rather than snapping to a midpoint.",
+      "spec": {
+        "algorithm": "EAGLE3",
+        "num_steps": 3,
+        "num_draft_tokens": 4,
+        "eagle_topk": 1,
+        "adaptive": true,
+        "adaptive_config": null
+      }
+    }
+  ],
+  "_hardware_note": {
+    "min_recommended_vram_gb": 48,
+    "reasoning": "Llama-3.1-8B fp16 is ~16.1 GB of weights plus ~1.5 GB for the EAGLE3 draft. At mem_fraction_static 0.7 a 24 GB card reserves only 16.8 GB total, which is less than the static weights alone, so startup OOMs before any KV cache is allocated. 48 GB (L40S / A6000) leaves ~16 GB for KV cache and the per-tier CUDA graphs.",
+    "smaller_gpu_options": [
+      "Lower mem_fraction_static is NOT a fix: the weights are weights.",
+      "Quantized target (e.g. AWQ-INT4) would fit 24 GB but changes acceptance behaviour and adds a confounder -- use only as an explicitly-labelled secondary check, never as the primary pair.",
+      "Reduce cuda_graph_max_bs_decode to 32 to cut graph memory if VRAM is tight."
+    ]
+  }
+}

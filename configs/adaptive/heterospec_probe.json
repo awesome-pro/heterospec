@@ -1,0 +1,30 @@
+{
+  "_comment": "Instrumentation ladder for Phase 6. NOT a performance configuration and NOT a baseline -- it exists to make the controller switch often, so we collect a diverse set of (active_k, batch_size, accepted) observations and can test the pre-draft vs post-verify batch-size routing question from docs/01-adaptive-stack.md section 3. Wide ladder, no hysteresis, fast EMA, short warmup.",
+  "ema_alpha": 0.5,
+  "warmup_batches": 2,
+  "update_interval": 1,
+  "1": {
+    "candidate_steps": [0, 1, 3, 5, 7],
+    "up_hysteresis": 0.0,
+    "down_hysteresis": 0.0,
+    "ceiling_coeff": 0
+  },
+  "8": {
+    "candidate_steps": [0, 1, 3, 5, 7],
+    "up_hysteresis": 0.0,
+    "down_hysteresis": 0.0,
+    "ceiling_coeff": 0
+  },
+  "32": {
+    "candidate_steps": [0, 1, 3, 5, 7],
+    "up_hysteresis": 0.0,
+    "down_hysteresis": 0.0,
+    "ceiling_coeff": 0
+  },
+  "64": {
+    "candidate_steps": [1, 3, 5, 7],
+    "up_hysteresis": 0.0,
+    "down_hysteresis": 0.0,
+    "ceiling_coeff": 0
+  }
+}

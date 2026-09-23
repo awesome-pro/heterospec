@@ -47,9 +47,9 @@ assert result.accept_lens.is_cpu
 next_token_ids = result.next_token_ids.tolist()
 accept_lens = result.accept_lens.tolist()
 stride = _get_speculative_output_stride(result)
-num_non_draft = result.num_non_draft_tokens_per_req          # 757
+num_non_draft = result.num_non_draft_tokens_per_req  # 757
 
-result.num_correct_drafts_per_req_cpu = [                    # 758
+result.num_correct_drafts_per_req_cpu = [  # 758
     length - num_non_draft for length in accept_lens
 ]
 result.num_correct_drafts = sum(result.num_correct_drafts_per_req_cpu)
@@ -70,7 +70,7 @@ Key points:
 Immediately after, the feedback call:
 
 ```python
-self.model_worker.on_verify_complete_cpu(                     # 777
+self.model_worker.on_verify_complete_cpu(  # 777
     result.num_correct_drafts_per_req_cpu, batch_size=len(batch.reqs)
 )
 ```
@@ -87,9 +87,9 @@ Two independent aggregations happen, at different granularities.
 ```python
 # same function, ~805
 req.spec_verify_ct += 1
-num_correct_drafts = result.num_correct_drafts_per_req_cpu[i]   # 807
-req.spec_num_correct_drafts += num_correct_drafts               # 808
-req.update_spec_correct_drafts_histogram(num_correct_drafts)    # 809
+num_correct_drafts = result.num_correct_drafts_per_req_cpu[i]  # 807
+req.spec_num_correct_drafts += num_correct_drafts  # 808
+req.update_spec_correct_drafts_histogram(num_correct_drafts)  # 809
 ```
 
 `update_spec_correct_drafts_histogram` (`managers/schedule_batch.py:1455`) grows a
@@ -150,11 +150,12 @@ is frozen.
 key `<=` that value:
 
 ```python
-def _pad_to_cuda_graph_bs(self, batch_size: int) -> int:      # 337
+def _pad_to_cuda_graph_bs(self, batch_size: int) -> int:  # 337
     idx = bisect.bisect_left(self._cuda_graph_bs, batch_size)
     return self._cuda_graph_bs[idx] if idx < len(...) else batch_size
 
-def _find_closest_bs(self, target: int) -> int:               # 345
+
+def _find_closest_bs(self, target: int) -> int:  # 345
     idx = bisect.bisect_right(self._bs_list, target) - 1
     return self._bs_list[max(0, idx)]
 ```

@@ -1,0 +1,27 @@
+{
+  "_comment": "SGLang's documented 'aggressive' preset for strong/high-variance draft models (docs/docs/advanced_features/adaptive_speculative_decoding.mdx). Included as a second adaptive reference point, since the default ladder is deliberately conservative and could under-speculate for EAGLE3 on Llama-3.1-8B.",
+  "1": {
+    "candidate_steps": [1, 3, 7],
+    "up_hysteresis": 0.0,
+    "down_hysteresis": -0.25,
+    "ceiling_coeff": 0
+  },
+  "8": {
+    "candidate_steps": [1, 3, 7],
+    "up_hysteresis": 0.0,
+    "down_hysteresis": -0.25,
+    "ceiling_coeff": 3.0
+  },
+  "64": {
+    "candidate_steps": [1, 3],
+    "up_hysteresis": 0.0,
+    "down_hysteresis": -0.25,
+    "ceiling_coeff": 1.67
+  },
+  "128": {
+    "candidate_steps": [1, 3],
+    "up_hysteresis": 0.0,
+    "down_hysteresis": -0.25,
+    "ceiling_coeff": 1.2
+  }
+}
