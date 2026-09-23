@@ -21,55 +21,43 @@ expensive mistake available, because it wastes time *and* a re-deploy.
 | GPU | 1× RTX A6000 (48 GB) | The recommended card |
 | **CUDA version** | **13.0** | The pinned SGLang builds from `cuda:13.0.3` |
 | **Container disk** | **100 GB** | Default 30 GB cannot hold weights + wheels + results |
-| **Volume** | **Network volume, 50 GB, at `/workspace`** | See the sub-steps below |
+| Volume | **none — skip it** | See below |
 | PyTorch | leave the template's version | The bootstrap installs `torch==2.13.0` itself |
 
-Set this environment variable while you are here:
+### 1a. Do NOT add a volume
 
-```text
-HF_HOME=/workspace/hf
-```
+The console will push you toward a persistent volume ("Nothing mounted at the
+template's path"). **Ignore that warning and deploy without a volume.**
 
-### 1a. Adding the volume (do this *before* deploying)
+The volume exists to avoid re-downloading the ~17.6 GB of weights. That download
+takes 3–5 minutes, which at $0.53/hr is about **$0.03 of GPU time**. The volume
+costs **$3.50–7.00 per month**, billed continuously while it exists — including
+while no pod is running. Break-even is around 100 sessions in a month; this
+project runs one or two.
 
-Clicking **Add volume** opens a **Create storage** dialog. The order matters:
+The volume also has to live in the same datacenter as the pod, which is an extra
+way to get stuck. Skipping it removes the problem rather than managing it.
 
-1. Choose **Network volume** ($0.07/GB/mo), *not* Global volume (BETA, $0.09/GB/mo)
-2. Set **size to 50 GB**
-3. Keep the generated name
-4. Click **Create network volume** — the button is labelled after whichever type
-   is selected
-5. You are returned to the deploy screen
+Set the container disk to **100 GB** instead (~$0.013/hr — about 3 cents for the
+whole session) and keep everything on the container. Container disk is erased when
+the pod is terminated, which is exactly what you want here: copy the results off
+(Phase 6) and let the rest go.
 
-Then confirm, *before* clicking **Deploy Pod**:
+### 1b. Environment variables
 
-* the yellow *"Nothing mounted at the template's path"* warning is **gone**
-* the volume is listed as mounted at **`/workspace`**
-* **Container disk is set to 100 GB**
-
-> A network volume is tied to one datacenter, so the pod must be in the same one.
-> If the A6000 is unavailable there, use **Global volume** instead — being
-> region-independent is what it is for, and the beta risk is acceptable at this
-> budget.
+You do **not** need to set `HF_HOME` in the console. Export it in the shell in
+Phase 3; it is inherited by every server the session launches. Without a volume
+the default cache location is fine.
 
 > **The PyTorch version on the template does not matter.** If it says 2.8.0, the
 > bootstrap's `pip install -e` replaces it with the pinned 2.13.0. That is another
 > reason the container disk must be 100 GB. Phase 4 prints
 > `ok torch 2.13.0 matches the pin` to confirm.
 
-> **Volume cost is monthly, not hourly:** 50 GB is about $3.50/month if you leave
-> it standing. Delete it once you have finished Session 2.
-
-> **Why the volume matters.** Without it, the ~17 GB of model weights live on the
-> container and are re-downloaded every time you start a pod. With it, you pay the
-> download once for the whole project. It is the single biggest cost saver.
-
-> **Why CUDA 13.** The fork's `docker/Dockerfile` builds from
-> `nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04`, and `python/pyproject.toml` pins
-> `torch==2.13.0`, `cuda-python>=13.0`, `flashinfer_python[cu13]==0.6.18`. On a cu12
-> image, pip drags in newer torch + cu13 kernels and can leave the preinstalled
-> torchvision/flashinfer ABI-mismatched.
-
+> **When a volume does pay off:** only if you run many sessions over a long period,
+> or if RunPod's bandwidth from your chosen datacenter turns out to be slow. If
+> Session 1 says "pursue" and you find yourself running five more sessions, revisit
+> this — at 50 GB it is $3.50/month.
 **✅ Check:** the pod shows `Running`, the volume is mounted at `/workspace`, and
 `nvidia-smi` reports an RTX A6000 with ~48 GB.
 
@@ -94,12 +82,14 @@ The target model is **gated**: it will fail unless you have accepted the licence
 3. On the pod:
 
 ```bash
-export HF_HOME=/workspace/hf
+export HF_HOME=/root/hf
 export HF_TOKEN=hf_paste_your_token_here
 ```
 
-**✅ Check:** `echo $HF_TOKEN` prints your token, and `echo $HF_HOME` prints
-`/workspace/hf`.
+`HF_HOME` is inherited by every server the session launches, so the weights are
+read from one cache instead of being re-fetched per launch.
+
+**✅ Check:** `echo $HF_TOKEN` prints your token.
 
 ---
 
@@ -110,7 +100,7 @@ installs SGLang and the harness, checks the runtime matches, runs the fork's uni
 tests, downloads the weights, and prints the plan.
 
 ```bash
-cd /workspace
+mkdir -p /workspace && cd /workspace
 git clone https://github.com/awesome-pro/heterospec.git
 cd heterospec
 bash scripts/gpu_bootstrap.sh
@@ -283,15 +273,16 @@ is always: stop, send me the output, wait.
 ## The short version
 
 ```bash
-# 1. Deploy: A6000 48GB, CUDA 13.0, 100GB disk, 100GB volume at /workspace
+# 1. Deploy: A6000 48GB, CUDA 13.0, 100GB container disk, NO volume
 # 2. Connect to the pod terminal
 
 # 3. On the pod:
-export HF_HOME=/workspace/hf
+export HF_HOME=/root/hf
 export HF_TOKEN=hf_...              # after accepting the Llama-3.1 licence
 
 # 4. On the pod:
-cd /workspace && git clone https://github.com/awesome-pro/heterospec.git
+mkdir -p /workspace && cd /workspace
+git clone https://github.com/awesome-pro/heterospec.git
 cd heterospec && bash scripts/gpu_bootstrap.sh
 
 # 5. On the pod (PAID — the only paid step):

@@ -36,8 +36,14 @@ measured. It would be a confounder, not a saving.
 
 Set up once, then reuse for the whole project:
 
-* **Network volume** mounted at `/workspace` (100 GB is ample). Model weights are
-  ~17 GB and would otherwise be re-downloaded on every start.
+* **Volume: usually skip it.** The console recommends a persistent volume at
+  `/workspace`, but it is only worth it for many sessions. The ~17.6 GB of weights
+  download in 3–5 minutes (~$0.03 of GPU time at $0.53/hr), while a 50 GB volume
+  bills ~$3.50/month *continuously* — including while no pod runs. Break-even is
+  roughly 100 sessions per month. For Session 1, use container disk only. Revisit
+  this if the project reaches many sessions, or if the datacenter's bandwidth
+  makes the download slow. A network volume is also pinned to one datacenter, so
+  it must match the pod's.
 * **Container disk** ≥ 60 GB, ideally 100 GB. 30 GB is **not** enough: the weights
   are ~17.6 GB, and the pinned SGLang pulls `torch==2.13.0` plus cu13
   `flashinfer`/`sgl-kernel` wheels on top of the base image. Container disk is
