@@ -30,6 +30,12 @@ BASE_SHA="66ce8c55cc"
 PR1_BRANCH="heterospec/policy-feedback-identity"
 PR1_SHA="65aaba0418"
 
+# Runtime the pinned SGLang expects: docker/Dockerfile builds from
+# nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04 (python 3.12), and pyproject.toml
+# pins torch==2.13.0 with flashinfer_python[cu13]. A cu12 template is wrong.
+TORCH_PIN="2.13.0"
+CUDA_MAJOR_PIN="13"
+
 SGLANG_URL="${SGLANG_URL:-https://github.com/awesome-pro/sglang.git}"
 HETEROSPEC_URL="${HETEROSPEC_URL:-https://github.com/awesome-pro/heterospec.git}"
 
@@ -217,6 +223,25 @@ if [ -d "$SGLANG_DIR/.git" ]; then
   fi
 fi
 
+check_torch_runtime() {
+  local out ver cuda
+  if ! out="$("$PYTHON" -c 'import torch; print(torch.__version__, torch.version.cuda)' 2>/dev/null)"; then
+    warn "torch is not importable (the pin expects $TORCH_PIN on CUDA $CUDA_MAJOR_PIN)"
+    return 0
+  fi
+  ver="$(printf '%s' "$out" | awk '{print $1}')"
+  cuda="$(printf '%s' "$out" | awk '{print $2}')"
+  case "$ver" in
+    "$TORCH_PIN"*) ok "torch $ver matches the pin" ;;
+    *) warn "torch $ver != pinned $TORCH_PIN (the editable install should have fixed this)" ;;
+  esac
+  case "$cuda" in
+    "$CUDA_MAJOR_PIN".*) ok "CUDA $cuda" ;;
+    "")                 warn "torch reports no CUDA build" ;;
+    *)                  warn "CUDA $cuda, but the pin expects CUDA $CUDA_MAJOR_PIN (flashinfer_python[cu13])" ;;
+  esac
+}
+
 # ---------------------------------------------------------------------------
 # 3. install
 # ---------------------------------------------------------------------------
@@ -247,6 +272,8 @@ else
     fail "import check failed after install"
   fi
 fi
+
+check_torch_runtime
 
 # ---------------------------------------------------------------------------
 # 4. models (before the clock matters)

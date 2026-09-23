@@ -48,11 +48,37 @@ Set up once, then reuse for the whole project:
 
 * **Network volume** mounted at `/workspace` (100 GB is ample). Model weights are
   ~17 GB and would otherwise be re-downloaded on every start.
-* **Template**: any PyTorch image with CUDA 12.x. Verify in the console — image
-  tags change, and a wrong tag wastes the first 20 minutes.
-* **Container disk** ≥ 40 GB for the environment.
+* **Container disk** ≥ 60 GB, ideally 100 GB. 30 GB is **not** enough: the weights
+  are ~17.6 GB, and the pinned SGLang pulls `torch==2.13.0` plus cu13
+  `flashinfer`/`sgl-kernel` wheels on top of the base image. Container disk is
+  ~$0.004/hr per 30 GB, so the extra space costs about a cent per hour.
 * Set `HF_HOME=/workspace/hf` as an environment variable so weights land on the
   volume.
+
+### The image must match the pinned SGLang
+
+The fork's `docker/Dockerfile` at the session commit is the authority here, not
+"whatever the newest template is". It builds from
+`nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04` with Python 3.12, and
+`python/pyproject.toml` pins:
+
+```text
+torch==2.13.0
+cuda-python>=13.0
+flashinfer_python[cu13]==0.6.18
+```
+
+So pick **CUDA 13.0** and a **PyTorch 2.13.0** image. Two failure modes to avoid:
+
+* A **cu12** image (e.g. a "PyTorch 2.8.0 / CUDA 12.8" template) is wrong on both
+  axes. `pip install -e` will then drag in torch 2.13.0 and cu13 kernels — several
+  GB — and the preinstalled torchvision/flashinfer built against the old torch can
+  be left ABI-mismatched. This is the most likely way to lose 20 minutes.
+* Python **3.13+** or **3.10**: `heterospec` requires `>=3.11,<3.13`. The official
+  image uses 3.12, which is the target.
+
+`scripts/gpu_bootstrap.sh --check` verifies all of this before anything is spent,
+including a `torch`/CUDA version check against the pin.
 
 ## 3. Pre-download the models (do this before the clock matters)
 
