@@ -47,12 +47,45 @@ upstream  https://github.com/sgl-project/sglang.git      (read-only, fetch here)
 ## Branch naming in the fork
 
 ```text
-heterospec/base                 frozen experiment base
-heterospec/iter-telemetry       iteration-level trace facility (experimental)
-heterospec/request-aware-policy HeteroSpec policy
+heterospec/base                     frozen experiment base (== pinned upstream commit)
+heterospec/iter-telemetry           iteration-level trace facility (research)
+heterospec/policy-feedback-identity PR 1: request identity on the policy feedback path
+heterospec/request-aware-policy     HeteroSpec policy (only if the gap justifies it)
 ```
 
 Work branches are kept narrow so upstream PRs can be carved out cleanly.
+
+### Why the two work branches are separate, and what that means for tests
+
+`heterospec/iter-telemetry` and `heterospec/policy-feedback-identity` are
+**independent branches off `heterospec/base`**, not a stack. That is deliberate:
+
+* PR 1 is intended for upstream and must be a clean, minimal diff. Bundling a
+  research trace facility into it would make it much harder to review.
+* The trace patch is explicitly **not** proposed upstream as-is (see
+  `docs/01-adaptive-stack.md` §6 and the README).
+
+The cost is that only one can be checked out at a time, so branch-sensitive tests
+skip when their patch is absent:
+
+| Test file | Needs |
+| --- | --- |
+| `tests/test_trace_patch.py` | `heterospec/iter-telemetry` checked out |
+| `tests/test_pr1_policy_identity.py` | `heterospec/policy-feedback-identity` checked out |
+
+Both skip with an actionable message rather than failing, and both assert against
+the fork's working tree. To run everything:
+
+```bash
+git -C ../sglang checkout heterospec/iter-telemetry
+.venv/bin/python -m pytest -q          # trace-patch tests run, PR 1 tests skip
+
+git -C ../sglang checkout heterospec/policy-feedback-identity
+.venv/bin/python -m pytest -q          # PR 1 tests run, trace-patch tests skip
+```
+
+An alternative is a second `git worktree` of the fork, but the harness reads a
+single sibling path, so the branch switch is simpler.
 
 ## Local environment
 

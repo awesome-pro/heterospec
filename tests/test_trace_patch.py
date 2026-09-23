@@ -32,10 +32,16 @@ TRACE_PATH = (
     / "heterospec_trace.py"
 )
 
-pytestmark = pytest.mark.skipif(
-    not TRACE_PATH.is_file(),
-    reason="sibling sglang checkout with the patch not present",
-)
+if not TRACE_PATH.is_file():
+    # One clear, actionable skip rather than 16 opaque ones. The fork carries two
+    # independent branches (the trace patch and the policy-identity PR) and only
+    # one can be checked out at a time.
+    pytest.skip(
+        "the checked-out sglang branch does not contain the trace patch. This is "
+        "expected on heterospec/base or heterospec/policy-feedback-identity. "
+        "Run: git -C ../sglang checkout heterospec/iter-telemetry",
+        allow_module_level=True,
+    )
 
 _ENV_KEYS = (
     "SGLANG_HETEROSPEC_TRACE",

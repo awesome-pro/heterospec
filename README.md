@@ -257,9 +257,14 @@ Status: **none opened yet.** Target shape, smallest first.
 
 | PR | Purpose | Status |
 | --- | --- | --- |
-| PR 1 | Pass request identity through the existing CPU verify-feedback path, so a policy can keep request-local state | drafted, not opened |
+| PR 1 | Pass request identity through the existing CPU verify-feedback path, so a policy can keep request-local state | **implemented** on `heterospec/policy-feedback-identity` (88 lines of production code, 226 of tests); not yet opened |
 | PR 2 | Policy-interface cleanup | **only if the code genuinely needs it** |
 | PR 3 | Request-aware mixed-workload policy, backed by evidence | not started |
+
+PR 1 is independent of the go/no-go: a policy interface that cannot maintain
+request-local state is a real gap regardless of whether HeteroSpec wins. It is
+carved off the pinned base rather than stacked on the trace branch, so its diff
+stays reviewable. See `docs/02-reproducibility.md` for the branch layout.
 
 PR 1's justification, as it stands today:
 
@@ -290,7 +295,7 @@ PROJECT.md's intended layout maps onto this repo as:
 | Doc | Contents |
 | --- | --- |
 | [`01-adaptive-stack.md`](docs/01-adaptive-stack.md) | The merged adaptive stack, audited with `file:line` refs, and the precise gap list |
-| [`02-reproducibility.md`](docs/02-reproducibility.md) | Pinning rules, branch naming, the local env |
+| [`02-reproducibility.md`](docs/02-reproducibility.md) | Pinning rules, the two independent fork branches, and which tests need which |
 | [`03-oracle-design.md`](docs/03-oracle-design.md) | The linearity correction, the four levels, and three measurement traps |
 | [`05-upper-bound-and-assumptions.md`](docs/05-upper-bound-and-assumptions.md) | Why the synthetic number is a ceiling, 11 assumptions with bias direction, the pre-registered decision rule |
 | [`06-gpu-runbook.md`](docs/06-gpu-runbook.md) | GPU choice with VRAM math, RunPod setup, the exact commands, failure table |
