@@ -264,49 +264,92 @@ class RunMetadata:
     extra: dict[str, Any] = field(default_factory=dict)
 
     # -- reproducibility gates ----------------------------------------------
+    #
+    # A run is reproducible when *which code produced it* is recorded exactly and
+    # nothing was uncommitted at the time. That is a three-part statement, and
+    # conflating any two of them is how a reproducibility story goes wrong:
+    #
+    #   base_sha               the pinned upstream commit this project baselines on
+    #   experiment_patch_sha   the actual SGLang HEAD during the run
+    #   working_tree_dirty     whether uncommitted edits were present
+    #
+    # A clean checkout of a known research patch is a perfectly citable artifact:
+    # `base_sha + experiment_patch_sha` names it precisely. An earlier version of
+    # this class treated "HEAD != pinned base" as non-citable, which would have
+    # marked every run on the telemetry branch unusable -- i.e. all of Session 1.
+
+    @property
+    def base_sha(self) -> str:
+        """The pinned upstream commit this project baselines against."""
+        return self.sglang_base_commit_expected
 
     @property
     def sglang_commit(self) -> str | None:
+        """Deprecated alias for `experiment_patch_sha`."""
+        return self.experiment_patch_sha
+
+    @property
+    def experiment_patch_sha(self) -> str | None:
+        """Actual SGLang HEAD during the run."""
         return (self.environment.get("sglang_git") or {}).get("commit")
 
     @property
     def sglang_dirty(self) -> bool | None:
+        """Deprecated alias for `working_tree_dirty`."""
+        return self.working_tree_dirty
+
+    @property
+    def working_tree_dirty(self) -> bool | None:
+        """Whether the SGLang checkout had uncommitted changes."""
         return (self.environment.get("sglang_git") or {}).get("dirty")
 
-    def commit_mismatch(self) -> bool:
-        """Whether the checkout differs from the documented pinned base.
+    @property
+    def sglang_branch(self) -> str | None:
+        return (self.environment.get("sglang_git") or {}).get("branch")
 
-        A mismatch is not automatically fatal -- a deliberate policy branch is
-        expected to differ -- but it must be visible, because results/README.md
-        forbids comparing across commits silently.
+    @property
+    def runs_on_pinned_base(self) -> bool:
+        """Whether HEAD *is* the pinned base, i.e. no research patch was applied.
+
+        Informational. False is normal and says nothing about citability.
         """
-        c = self.sglang_commit
+        c = self.experiment_patch_sha
         if c is None:
-            return True
-        return not c.startswith(self.sglang_base_commit_expected[:12])
+            return False
+        return c.startswith(self.base_sha[:12])
+
+    def commit_mismatch(self) -> bool:
+        """Inverse of `runs_on_pinned_base`, kept for compatibility."""
+        return not self.runs_on_pinned_base
 
     def citable(self) -> tuple[bool, str]:
         """Whether this run may appear in README results tables.
 
-        Encodes results/README.md rule 1: no dirty runs, and the commit must be
-        known. Mock runs are refused outright -- synthetic data must never reach
-        a results table by accident.
+        Citable requires: not a mock, a *clean* working tree, and a recorded
+        `experiment_patch_sha`. A run on a research patch qualifies, provided the
+        patch commit is named -- that is what makes it reproducible.
+
+        Deliberately does **not** require `experiment_patch_sha == base_sha`. The
+        session runs on the telemetry branch, off-base by design.
         """
         if self.is_mock:
             return False, "server was a mock; synthetic data is not a result"
-        if self.sglang_dirty is None:
+        if self.working_tree_dirty is None:
             return False, "SGLang git state unknown (not a checkout?)"
-        if self.sglang_dirty:
-            return False, "SGLang tree was dirty; run is experimental, not a result"
-        if self.sglang_commit is None:
-            return False, "SGLang commit unknown"
-        if self.commit_mismatch():
+        if self.working_tree_dirty:
             return False, (
-                f"commit {self.sglang_commit[:12]} differs from pinned base "
-                f"{self.sglang_base_commit_expected[:12]}; re-baseline or label "
-                f"explicitly"
+                "SGLang tree had uncommitted changes; the exact code cannot be "
+                "reconstructed, so this run is not citable"
             )
-        return True, "clean tree at pinned commit"
+        sha = self.experiment_patch_sha
+        if sha is None:
+            return False, "SGLang commit unknown; cannot name the code that ran"
+        if self.runs_on_pinned_base:
+            return True, f"clean tree at pinned base {sha[:12]}"
+        return True, (
+            f"clean tree at experiment patch {sha[:12]} "
+            f"(base {self.base_sha[:12]}, branch {self.sglang_branch})"
+        )
 
     @property
     def is_mock(self) -> bool:
@@ -327,9 +370,17 @@ class RunMetadata:
         ok, reason = self.citable()
         d["citable"] = ok
         d["citable_reason"] = reason
-        d["sglang_commit"] = self.sglang_commit
-        d["sglang_dirty"] = self.sglang_dirty
+        # Three-part provenance, surfaced at the top level so reading
+        # metadata.json does not require unpacking `environment`.
+        d["base_sha"] = self.base_sha
+        d["experiment_patch_sha"] = self.experiment_patch_sha
+        d["working_tree_dirty"] = self.working_tree_dirty
+        d["sglang_branch"] = self.sglang_branch
+        d["runs_on_pinned_base"] = self.runs_on_pinned_base
         d["is_mock"] = self.is_mock
+        # Deprecated aliases, kept so older result directories still read.
+        d["sglang_commit"] = self.experiment_patch_sha
+        d["sglang_dirty"] = self.working_tree_dirty
         d["commit_mismatch"] = self.commit_mismatch()
         return d
 

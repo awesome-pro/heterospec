@@ -3,7 +3,7 @@
 Request-aware adaptive speculative decoding for heterogeneous SGLang workloads.
 
 > **Status: Session 1 ready, awaiting GPU.** The harness, analysis and oracle are
-> built and tested on the Mac (346 tests, 0 GPU hours). No performance number
+> built and tested on the Mac (387 tests, 0 GPU hours). No performance number
 > exists yet. Nothing in this README is a result.
 
 ## 1. Problem
@@ -166,9 +166,19 @@ Three methodological requirements, each of which cost a bug to discover:
    mean, not a sum of per-batch rates. Getting this wrong made L3 report `982`
    against `~5`.
 
+Even once calibrated, `Cost(K, n)` is an **effective serving cost proxy at
+concurrency `n`**, not a model-step cost. That is enough for a go/no-go screen; it
+is not enough to defend a headline number in the 3–5% band, where cost must be
+measured server-side instead. See `docs/06-gpu-runbook.md` §8.
+
 Synthetic adversarial upper bound so far: **~1.03%**, with a **placeholder** cost
 model. Why that is a ceiling, and every assumption that could move it:
 [`docs/05-upper-bound-and-assumptions.md`](docs/05-upper-bound-and-assumptions.md).
+
+**The gate is the K-invariance check, and it runs first.** If per-position
+acceptance depends on `K`, the gap is uninterpretable whatever its size. Session 1
+then screens on `mixed_50_50`; a positive result must be confirmed on `real_mixed`
+and `phase_shift` in a small Session 2 before any policy work begins.
 
 ## 8. HeteroSpec policy
 
@@ -234,7 +244,7 @@ Everything below runs on the Mac with no GPU:
 ```bash
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -e ".[dev]"
-.venv/bin/python -m pytest                      # 346 tests
+.venv/bin/python -m pytest                      # 387 tests
 
 # full pipeline against a mock SGLang, no GPU
 .venv/bin/python -m heterospec.benchmark \

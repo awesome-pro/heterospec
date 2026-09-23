@@ -34,7 +34,8 @@ from heterospec.client import SGLangClient
 from heterospec.config import LaunchConfig
 from heterospec.costmodel import CalibrationPoint, MeasuredCostModel
 from heterospec.records import read_json
-from heterospec.runner import RunConfig, run_benchmark
+from heterospec.runner import RunConfig, run_benchmark, warmup_server
+from heterospec.workloads import build_plan
 
 __all__ = [
     "SessionStep",
@@ -43,6 +44,7 @@ __all__ = [
     "ServerProcess",
     "run_session",
     "cost_model_from_results",
+    "estimate_session_minutes",
     "k_invariance_from_results",
     "oracle_gap_report",
 ]
@@ -342,6 +344,7 @@ def run_session(
     dispatch: str = "waves",
     on_event: Callable[[str], None] | None = None,
     collect_trace: bool = True,
+    warmup_requests: int = 8,
     env_extra: dict[str, str] | None = None,
     launcher_module: str = "sglang.launch_server",
 ) -> list[StepResult]:
@@ -358,6 +361,10 @@ def run_session(
 
     `launcher_module` exists so this orchestration can be exercised against a stub
     server in tests. On real hardware it is always SGLang's launcher.
+
+    `warmup_requests` untimed requests are sent at each step's own concurrency
+    before timing begins. Set it to 0 only if you have some other reason to
+    believe the server is already at steady state.
     """
     results: list[StepResult] = []
 
@@ -395,9 +402,16 @@ def run_session(
         first_in_group = True
 
         for step in group:
+            # Trace ONLY the adaptive capture. Calibration runs feed the cost
+            # model, whose numbers are the oracle's denominator, and the tracer
+            # does synchronous JSON work on the result-processing path once per
+            # decode iteration. The overhead is small, but paying it on the
+            # timed runs to collect data nothing needs would be careless when the
+            # effect under study is a few percent. Calibration's oracle input
+            # comes from response meta_info, not from the trace.
             trace_path = (
                 results_root / f"trace_{policy_id}_c{step.concurrency}.jsonl"
-                if (collect_trace and step.purpose in ("adaptive", "calibration"))
+                if (collect_trace and step.purpose == "adaptive")
                 else None
             )
             server = ServerProcess(
@@ -425,6 +439,33 @@ def run_session(
                 if first_in_group:
                     log(f"  server ready: {policy_id} @ {server.base_url}")
                     first_in_group = False
+
+                # Untimed warm-up at this step's own concurrency: /health-ready
+                # does not mean the kernels and allocator for these shapes are
+                # warm, and the first requests would otherwise be slower.
+                if warmup_requests > 0:
+                    specs = build_plan(
+                        step.workload,
+                        max(warmup_requests, step.concurrency),
+                        seed=step.seed,
+                        max_new_tokens=max_new_tokens,
+                        rid_prefix="wu",
+                    )
+                    w_ok, w_fail = warmup_server(
+                        server.base_url,
+                        specs,
+                        concurrency=step.concurrency,
+                        num_requests=max(warmup_requests, step.concurrency),
+                        max_new_tokens=max_new_tokens,
+                        timeout_s=min(server_timeout_s, 900.0),
+                    )
+                    log(f"  warm-up: {w_ok} ok, {w_fail} failed (discarded)")
+                    if w_ok == 0:
+                        raise RuntimeError(
+                            "every warm-up request failed; the server is not "
+                            "serving, so the timed run would be meaningless.\n"
+                            + server.tail_log()
+                        )
                 cfg = RunConfig(
                     workload=step.workload,
                     policy_id=f"{step.policy_id}_c{step.concurrency}",
@@ -687,16 +728,92 @@ def write_session_report(
 # ---------------------------------------------------------------------------
 
 
-def _estimate_minutes(
-    steps: Sequence[SessionStep], *, per_run_s: float = 150.0, startup_s: float = 240.0
-) -> float:
-    """Rough GPU-time estimate so the plan can be sanity-checked before paying.
+#: Union of the built-in adaptive ladder ``[0,1,3,5,7]``. A tier is one
+#: ``SpecRuntimeState``: its own attention backends and its own CUDA graphs, so
+#: startup cost scales with the number of tiers, not with a flat constant.
+DEFAULT_ALLOCATION_TIERS = 5
 
-    `per_run_s` and `startup_s` are order-of-magnitude placeholders to be replaced
-    with observed values after the first real session.
+
+def _tier_count(launch: LaunchConfig) -> int:
+    """How many runtime states a policy must build at startup."""
+    spec = launch.spec
+    if spec is None or not spec.adaptive:
+        return 1
+    if spec.adaptive_config:
+        try:
+            from heterospec.config import load_adaptive_config, resolve_candidate_steps
+
+            return max(
+                1,
+                len(
+                    resolve_candidate_steps(load_adaptive_config(spec.adaptive_config))
+                ),
+            )
+        except (OSError, ValueError, KeyError):
+            return DEFAULT_ALLOCATION_TIERS
+    return DEFAULT_ALLOCATION_TIERS
+
+
+def estimate_session_minutes(
+    steps: Sequence[SessionStep],
+    launches: dict[str, LaunchConfig] | None = None,
+    *,
+    per_run_s: float = 150.0,
+    model_load_s: float = 120.0,
+    per_tier_s: float = 90.0,
+    warmup_s: float = 20.0,
+) -> dict[str, Any]:
+    """Nominal and pessimistic GPU-minute estimates for a plan.
+
+    Startup is modelled as **model load plus a per-tier cost**, because each
+    adaptive tier carries its own CUDA graphs and attention backends: the
+    adaptive server has to build several, so it starts markedly slower than a
+    static-K server. A flat startup constant hides that and produced an
+    over-optimistic total.
+
+    All coefficients are order-of-magnitude placeholders. The value of this
+    function is the *range*, not the point estimate: budget against the
+    pessimistic figure and replace the coefficients with observed timings after
+    the first session.
     """
-    n_servers = len({s.policy_id for s in steps})
-    return (len(steps) * per_run_s + n_servers * startup_s) / 60.0
+    by_policy: dict[str, list[SessionStep]] = {}
+    for s in steps:
+        by_policy.setdefault(s.policy_id, []).append(s)
+
+    nominal = 0.0
+    pessimistic = 0.0
+    breaker: list[dict[str, Any]] = []
+    for pid, group in by_policy.items():
+        tiers = _tier_count(launches[pid]) if launches and pid in launches else 1
+        startup = model_load_s + per_tier_s * tiers
+        runs = len(group) * (per_run_s + warmup_s)
+        nominal += startup + runs
+        # 1.6x covers slower-than-expected graph capture, downloads on a cold
+        # volume, retries and wave-barrier tail dead time.
+        pessimistic += startup * 1.6 + runs * 1.6
+        breaker.append(
+            {
+                "policy": pid,
+                "tiers": tiers,
+                "runs": len(group),
+                "startup_s": round(startup, 1),
+            }
+        )
+
+    return {
+        "n_runs": len(steps),
+        "n_servers": len(by_policy),
+        "nominal_minutes": nominal / 60.0,
+        "pessimistic_minutes": pessimistic / 60.0,
+        "assumptions": {
+            "per_run_s": per_run_s,
+            "model_load_s": model_load_s,
+            "per_tier_s": per_tier_s,
+            "warmup_s": warmup_s,
+            "pessimistic_multiplier": 1.6,
+        },
+        "per_policy": breaker,
+    }
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -762,11 +879,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         for s in steps:
             print(f"  {s.describe()}")
-        est = _estimate_minutes(steps)
+        est = estimate_session_minutes(steps, launches)
         print(
-            f"\nrough GPU-time estimate: ~{est:.0f} min "
-            f"(placeholder rates; replace after the first real session)"
+            f"\nGPU-time estimate: ~{est['nominal_minutes']:.0f} min nominal, "
+            f"~{est['pessimistic_minutes']:.0f} min pessimistic "
+            f"(placeholder coefficients; budget against the pessimistic figure)"
         )
+        for row in est["per_policy"]:
+            print(
+                f"    {row['policy']:<18} tiers={row['tiers']:<2} "
+                f"runs={row['runs']:<2} startup~{row['startup_s']:.0f}s"
+            )
         if args.plan:
             return 0
 

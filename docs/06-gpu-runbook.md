@@ -2,10 +2,14 @@
 
 The only work that must happen on rented hardware, written so nothing on the GPU
 side needs authoring or debugging. Everything it depends on is built and tested on
-the Mac (346 tests, no GPU).
+the Mac (387 tests, no GPU).
 
-Target: **under an hour of GPU time.** Roughly 16 benchmark runs across 6 server
-launches.
+Target: **roughly 16 benchmark runs across 6 server launches**, estimated at
+~72 min nominal / ~116 min pessimistic. Budget against the pessimistic figure:
+the dominant uncertainty is per-tier CUDA graph capture, and the adaptive server
+builds five tiers (one per candidate step) against one for each static arm, so it
+starts far slower than a static server. Both figures are order-of-magnitude
+placeholders until the first real session replaces the coefficients.
 
 ---
 
@@ -103,27 +107,30 @@ can be opened with verified tests rather than hopeful ones:
 
 ```bash
 cd /workspace/sglang
+git checkout heterospec/policy-feedback-identity
 
-# PR 1: request identity on the policy feedback path
+# PR 1: request identity on the policy feedback path (three files)
 python -m pytest -q test/registered/unit/spec/test_adaptive_runtime_state.py
 python -m pytest -q test/registered/unit/spec/test_adaptive_spec_params.py
 python -m pytest -q test/registered/unit/managers/test_batch_result_processor_spec_grammar.py
 
-# the trace patch (only present on heterospec/iter-telemetry)
+# the trace patch -- a DIFFERENT branch, so a separate checkout
+git checkout heterospec/iter-telemetry
 python -m pytest -q test/registered/unit/spec/test_heterospec_trace.py
 ```
 
-All four are registered in CPU CI, so they need no GPU. If any fails, report the
-failure before running the session — the session's results are unaffected, but
-PR 1 must not be opened until its tests pass.
+All four are registered in CPU CI, so they need no GPU. If any PR 1 test fails,
+report it before running the session — the session's results are unaffected, but
+PR 1 must not be opened until its three files pass.
 
-Note that `heterospec/iter-telemetry` and `heterospec/policy-feedback-identity`
-are separate branches, so the two groups of tests need different checkouts:
+Then switch back for the session:
 
 ```bash
-git checkout heterospec/policy-feedback-identity   # PR 1 tests
-git checkout heterospec/iter-telemetry             # trace patch tests + the session
+git checkout heterospec/iter-telemetry   # the session runs this branch
 ```
+
+The two branches are independent (`docs/02-reproducibility.md`), so only one can
+be checked out at a time — which is why the tests are listed in two groups.
 
 ## 5. Dry-run the plan (free, and worth doing)
 
@@ -141,14 +148,44 @@ paying.
 
 ```bash
 cd /workspace/heterospec
-ALLOW_OTHER_COMMIT=1 bash scripts/gpu_session_1.sh \
-    --sglang-path /workspace/sglang \
+bash scripts/gpu_session_1.sh --sglang-path /workspace/sglang \
     --launch-config configs/models/llama31_8b_eagle3.json
 ```
 
-`ALLOW_OTHER_COMMIT=1` is expected: the telemetry branch is deliberately not the
-pinned base commit. Runs are tagged `dirty: true` / off-base and are **not
-citable as results** — they are the measurement that decides whether to continue.
+No override is needed. The preflight **exits non-zero** unless HEAD is the
+expected telemetry commit, because a run at an unrecorded revision is not
+reproducible and the point of the preflight is to catch that before the meter
+starts. If you deliberately want another revision:
+
+```bash
+EXPECTED_SGLANG_SHA=<sha> bash scripts/gpu_session_1.sh ...   # named replacement
+ALLOW_UNPINNED=1         bash scripts/gpu_session_1.sh ...    # whatever is checked out
+```
+
+A **clean** checkout of the telemetry patch is citable: `base_sha +
+experiment_patch_sha` names it exactly. Only uncommitted changes disqualify a
+run, and the script warns if any are present.
+
+Two things the orchestrator now does that matter:
+
+* **Untimed warm-up** at each step's own concurrency, before timing starts.
+  `/health` returning 200 does not mean Triton kernels and allocator paths for
+  the shapes you are about to measure are warm, and the first requests would
+  otherwise be slower. Warm-up uses `warmup-*` rids and is discarded. If *every*
+  warm-up request fails, the step is failed rather than timed — a cost model
+  built on failures looks like data, which is worse than no result.
+* **Tracing only the adaptive capture.** The tracer does synchronous JSON work
+  once per decode iteration, so paying it on the runs that produce the cost
+  model would be careless when the effect under study is a few percent.
+  Calibration's oracle input comes from response `meta_info`, not the trace.
+
+Every server is launched with `--disable-radix-cache`, set in the model config.
+Prefix caching is not a variable under study, and the grid reuses the same seeded
+prompt pool across concurrencies on one server, so a warm cache would make later
+runs look cheaper and contaminate the batch-size axis. SGLang's own benchmarks
+pass this flag for the same reason. Note it also lowers *absolute* throughput, so
+absolute numbers are not comparable with a cache-enabled run — only the ratios
+this project uses are.
 
 The script prints progress and, at the end:
 
@@ -179,17 +216,65 @@ Then stop the pod. Analysis is offline and free.
 
 ## 8. Reading the result
 
-Pre-registered in `docs/05-upper-bound-and-assumptions.md` §4, fixed before seeing
-data:
+### Step 0 — check `k_invariance` first, before anything else
+
+The report's `k_invariance` field is the **gate on the entire analysis**, not a
+diagnostic. Every oracle number evaluates `E[acc | K]` at depths a request may
+never have run, which is only valid if per-position acceptance does not depend on
+`K`.
+
+```text
+FAIL  ->  the gap is uninterpretable. No-go, regardless of its size.
+PASS  ->  proceed to the gap.
+NOT ASSESSED -> fewer than two static depths produced usable data; fix and rerun.
+```
+
+Checking the gap before this would be reading a number that may not mean
+anything.
+
+### Then the gap, against the pre-registered thresholds
+
+Fixed in `docs/05-upper-bound-and-assumptions.md` §4 **before** seeing data:
 
 | Real recoverable gap | Decision |
 | --- | --- |
 | `< 2%` | **No-go.** Publish the negative result. |
 | `2–3%` | **Marginal.** Report honestly; pursue only if the mechanism is clean. |
-| `> 3–5%` | **Pursue.** Implement HeteroSpec as an `AdaptiveSpecPolicy`. |
+| `3–5%` | **Too close to call on a proxy cost model.** Validate the cost model before claiming anything — see below. |
+| `> 5%` | **Pursue**, after the Session 2 confirmation below. |
 
-Check `k_invariance` **first**. If it failed, the gap number is not interpretable
-at all and the answer is no-go regardless of its size.
+### The cost model is a proxy, and the wording matters
+
+`Cost(K, n)` derived from client-side timing is an **effective serving cost proxy
+at concurrency `n`**, not a measured model-step cost:
+
+* `n` is *client concurrency*, and the real decode batch size decays within a wave
+  as requests finish (32 → 27 → 23 → …).
+* Wall time includes prefill, HTTP overhead, scheduler gaps, EOS variation and
+  queue transitions — not just the target/draft decode step.
+
+That is good enough for a go/no-go screen, which is all Session 1 is. It is **not**
+good enough to defend a headline number in the 3–5% band. If the gap lands there,
+measure server-side step timing (SGLang exposes serving metrics and profiling)
+before claiming a result, rather than inferring cost from client throughput.
+
+### Session 2 is a separate, cheaper decision
+
+Session 1 screens on `mixed_50_50` — a *deliberately heterogeneous* synthetic
+mixture. That is the right first target: if even a purpose-built mixture produces
+`<2%`, the project is dead and nothing else needs measuring.
+
+But a positive Session 1 result could be an artifact of that mixture. So:
+
+| Session 1 result | Next step |
+| --- | --- |
+| `< 2%` | Stop. Write up the negative result. |
+| `2–5%` | Validate the cost model, then rerun the affected captures. |
+| `> 3–5%` | **Do not implement HeteroSpec yet.** Run a small Session 2 on `real_mixed` and `phase_shift` to confirm the phenomenon survives outside the synthetic mixture. |
+
+Only after the phenomenon is confirmed on real traffic does implementing the
+policy make sense. This keeps the expensive part of the project gated on evidence
+rather than on momentum.
 
 ## 9. Cost control
 
@@ -203,9 +288,13 @@ at all and the answer is no-go regardless of its size.
 
 | Symptom | Likely cause |
 | --- | --- |
+| Preflight exits 1 | HEAD is not the expected commit. It says which branch to check out, or pass `EXPECTED_SGLANG_SHA=<sha>` / `ALLOW_UNPINNED=1`. |
+| `working tree : DIRTY` | Uncommitted edits in the SGLang checkout. Commit or stash, or accept that results will not be citable. |
 | OOM at server start | 24 GB card, or `mem_fraction_static` too high for the card |
 | Server not ready in 30 min | gated model without `HF_TOKEN`, or weights not pre-downloaded |
+| `every warm-up request failed` | Server answers `/health` but cannot serve. Read `logs/server_*.log`; the step was skipped rather than timed. |
 | `no usable calibration cells` | every calibration step failed; read `logs/server_*.log` |
 | `no iteration trace found` | trace patch absent from the clone (wrong branch) |
 | `K-invariance: NOT ASSESSED` | fewer than two static depths produced usable data |
 | `no candidate depths within the common depth` | requests finished before any draft position was observed; raise `--max-new-tokens` |
+| Adaptive capture much slower than static at the same concurrency | expected: the trace is enabled only for the adaptive capture, so its throughput is **not** comparable. It is a diagnostic capture, not the adaptive-throughput baseline. |

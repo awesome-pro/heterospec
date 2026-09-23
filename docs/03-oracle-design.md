@@ -5,8 +5,14 @@ measurement traps found by testing the implementation. Both would have produced
 confidently wrong numbers after a GPU spend.
 
 Status: **design settled, cost model still a placeholder.** No number in this
-document may be quoted as a result until `Cost(K, n)` is GPU-calibrated
-(`docs/04-cost-model.md`).
+document may be quoted as a result until `Cost(K, n)` is GPU-calibrated.
+
+Even once calibrated, `Cost(K, n)` from client-side timing is an **effective
+serving cost proxy at concurrency `n`**, not a model-step cost: `n` is client
+concurrency rather than the real (decaying) decode batch size, and wall time
+includes prefill, HTTP and scheduler overhead. Adequate for a go/no-go screen;
+not adequate to defend a headline number in the 3–5% band — see
+`docs/05-upper-bound-and-assumptions.md` §4.
 
 ---
 
@@ -223,9 +229,11 @@ generated from the same prefix regardless of total steps. Approximately true for
 EAGLE topk=1 chain drafting, but an assumption, and load-bearing for every number
 above.
 
-Tested explicitly (`docs/05-k-invariance.md`) on the same static-K grid that
-calibrates the cost model. If it fails, all oracle numbers become
-uninterpretable upper bounds and the project stops.
+Tested explicitly by `heterospec/analysis/invariance.py`, on the same static-K
+grid that calibrates the cost model — see
+`docs/05-upper-bound-and-assumptions.md` §4 and `docs/06-gpu-runbook.md` §8. If it
+fails, all oracle numbers become uninterpretable upper bounds and the project
+stops.
 
 ## 10. Consequences to carry forward
 

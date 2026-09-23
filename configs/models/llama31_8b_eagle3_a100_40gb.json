@@ -16,6 +16,7 @@
     "mem_fraction_static": 0.85,
     "cuda_graph_max_bs_decode": 32,
     "cuda_graph_backend_prefill": "disabled",
+    "disable_radix_cache": true,
     "extra_args": []
   },
   "launches": [

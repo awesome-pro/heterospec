@@ -446,3 +446,131 @@ def test_run_session_no_orphan_processes(tmp_path, port):
     leftover = [p for p in out.stdout.split() if p.isdigit()]
     assert not leftover, f"orphaned server processes: {leftover}"
     assert _port_is_free(port)
+
+
+# ---------------------------------------------------------------------------
+# Warm-up in the orchestrator
+# ---------------------------------------------------------------------------
+
+
+def test_run_session_performs_warmup_before_timing(tmp_path, port):
+    events: list[str] = []
+    steps = [SessionStep("static_k1", 8, "mixed_50_50", 48, 0, "calibration", 1)]
+    results = run_session(
+        steps,
+        launches=LAUNCHES,
+        sglang_path=tmp_path,
+        results_root=tmp_path / "results",
+        logs_dir=tmp_path / "logs",
+        port=port,
+        python_exe=sys.executable,
+        server_timeout_s=90,
+        env_extra=_stub_env(),
+        launcher_module="launch_server",
+        warmup_requests=4,
+        on_event=events.append,
+    )
+    assert all(r.ok for r in results)
+    warm = [e for e in events if "warm-up:" in e]
+    assert warm, events
+    assert "0 failed" in warm[0]
+
+
+def test_warmup_can_be_disabled(tmp_path, port):
+    events: list[str] = []
+    steps = [SessionStep("static_k1", 8, "mixed_50_50", 48, 0, "calibration", 1)]
+    run_session(
+        steps,
+        launches=LAUNCHES,
+        sglang_path=tmp_path,
+        results_root=tmp_path / "results",
+        logs_dir=tmp_path / "logs",
+        port=port,
+        python_exe=sys.executable,
+        server_timeout_s=90,
+        env_extra=_stub_env(),
+        launcher_module="launch_server",
+        warmup_requests=0,
+        on_event=events.append,
+    )
+    assert not [e for e in events if "warm-up:" in e]
+
+
+def test_all_warmup_failing_fails_the_step_with_a_clear_reason(tmp_path, port):
+    """A server that is up but not serving must not produce a timed run.
+
+    Timing a server that cannot answer would produce a cost model built on
+    failures -- worse than no result, because it looks like data.
+    """
+    steps = [SessionStep("static_k1", 8, "mixed_50_50", 48, 0, "calibration", 1)]
+    results = run_session(
+        steps,
+        launches=LAUNCHES,
+        sglang_path=tmp_path,
+        results_root=tmp_path / "results",
+        logs_dir=tmp_path / "logs",
+        port=port,
+        python_exe=sys.executable,
+        server_timeout_s=90,
+        env_extra=_stub_env(STUB_FAIL_GENERATE="1"),
+        launcher_module="launch_server",
+        warmup_requests=2,
+    )
+    assert len(results) == 1
+    assert not results[0].ok
+    assert "every warm-up request failed" in (results[0].error or "")
+
+
+# ---------------------------------------------------------------------------
+# Tracing split
+# ---------------------------------------------------------------------------
+
+
+def _child_env_for(tmp_path, port, step) -> dict:
+    """Launch one step and return the server child's environment."""
+    dump = tmp_path / f"env_{step.purpose}.json"
+    run_session(
+        [step],
+        launches=LAUNCHES,
+        sglang_path=tmp_path,
+        results_root=tmp_path / "results",
+        logs_dir=tmp_path / "logs",
+        port=port,
+        python_exe=sys.executable,
+        server_timeout_s=90,
+        env_extra=_stub_env(STUB_ENV_DUMP=str(dump)),
+        launcher_module="launch_server",
+        warmup_requests=0,
+    )
+    return json.loads(dump.read_text())
+
+
+def test_the_calibration_server_never_gets_the_trace_env_var(tmp_path, port):
+    """The tracer does synchronous JSON work once per decode iteration.
+
+    Paying that on the runs that produce the cost model -- the oracle's
+    denominator -- would be careless when the effect under study is a few percent.
+    Calibration's oracle input comes from meta_info, not from the trace.
+
+    Asserting on the child's environment is stronger than checking for a trace
+    file, which a stub server would never write anyway.
+    """
+    env = _child_env_for(
+        tmp_path,
+        port,
+        SessionStep("static_k1", 8, "mixed_50_50", 48, 0, "calibration", 1),
+    )
+    assert "SGLANG_HETEROSPEC_TRACE" not in env, (
+        "calibration server was launched with tracing enabled"
+    )
+
+
+def test_the_adaptive_server_does_get_the_trace_env_var(tmp_path, port):
+    """The other half of the split: the adaptive capture must still be traced."""
+    env = _child_env_for(
+        tmp_path,
+        port,
+        SessionStep("sglang_adaptive", 8, "mixed_50_50", 48, 0, "adaptive", None),
+    )
+    assert "SGLANG_HETEROSPEC_TRACE" in env
+    assert env["SGLANG_HETEROSPEC_TRACE"].endswith("trace_sglang_adaptive_c8.jsonl")

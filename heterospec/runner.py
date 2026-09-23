@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -50,7 +50,88 @@ from heterospec.workloads import (
     summarise_plan,
 )
 
-__all__ = ["RunConfig", "RunResult", "run_benchmark"]
+__all__ = ["RunConfig", "RunResult", "run_benchmark", "warmup_server"]
+
+
+def warmup_server(
+    base_url: str,
+    specs: Sequence[RequestSpec],
+    *,
+    concurrency: int = 8,
+    num_requests: int = 8,
+    max_new_tokens: int | None = None,
+    temperature: float = 0.0,
+    timeout_s: float = 900.0,
+) -> tuple[int, int]:
+    """Send untimed requests to bring a freshly launched server to steady state.
+
+    `/health` returning 200 does **not** mean the paths about to be benchmarked
+    are warm. The first real requests can still trigger Triton JIT compilation,
+    allocator growth, and lazy initialisation of runtime paths. That makes
+
+        first benchmark  !=  steady-state benchmark
+
+    which matters here because the effect under study may be only a few percent.
+
+    Warm-up requests use their own `warmup-*` rids, so they can never be confused
+    with measured requests, and their results are discarded. They are sent at the
+    step's own concurrency so the same batch shapes and kernels are touched.
+
+    Returns `(n_ok, n_failed)`. Failures are reported rather than raised: a warm-up
+    that fails usually means the server is about to fail loudly anyway, with a
+    better error.
+    """
+    if not specs:
+        raise ValueError("warmup needs at least one request spec to draw prompts from")
+    if concurrency <= 0:
+        raise ValueError("concurrency must be > 0")
+    if num_requests <= 0:
+        return (0, 0)
+
+    ok = failed = 0
+    done = 0
+    workers = min(concurrency, num_requests)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        while done < num_requests:
+            size = min(workers, num_requests - done)
+            futures = [
+                pool.submit(
+                    _warmup_one,
+                    base_url,
+                    specs[(done + i) % len(specs)],
+                    index=done + i,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    timeout_s=timeout_s,
+                )
+                for i in range(size)
+            ]
+            for f in as_completed(futures):
+                if f.result():
+                    ok += 1
+                else:
+                    failed += 1
+            done += size
+    return ok, failed
+
+
+def _warmup_one(
+    base_url: str,
+    spec: RequestSpec,
+    *,
+    index: int,
+    max_new_tokens: int | None,
+    temperature: float,
+    timeout_s: float,
+) -> bool:
+    with SGLangClient(base_url, timeout_s=timeout_s) as client:
+        res = client.generate(
+            spec.prompt,
+            max_new_tokens=max_new_tokens or spec.max_new_tokens,
+            temperature=temperature,
+            rid=f"warmup-{index:05d}",
+        )
+    return res.ok
 
 
 @dataclass

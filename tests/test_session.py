@@ -384,3 +384,51 @@ def test_session_report_includes_k_invariance(tmp_path):
     assert "k_invariance" in payload
     assert "verdict" in payload["k_invariance"]
     assert "passed" in payload["k_invariance"]
+
+
+# # ---------------------------------------------------------------------------
+# Tier-aware time estimate
+# ---------------------------------------------------------------------------
+
+
+def test_estimate_reports_a_range_not_a_point():
+    from heterospec.session import estimate_session_minutes
+
+    steps = build_session_plan(LAUNCHES, ks=[1, 3], concurrencies=[8], waves_per_step=4)
+    est = estimate_session_minutes(steps, LAUNCHES)
+    assert est["nominal_minutes"] > 0
+    assert est["pessimistic_minutes"] > est["nominal_minutes"]
+
+
+def test_adaptive_policy_needs_more_startup_than_static():
+    """Each adaptive tier owns its own CUDA graphs, so startup scales with tiers."""
+    from heterospec.session import estimate_session_minutes
+
+    steps = build_session_plan(
+        LAUNCHES, ks=[1], concurrencies=[8], waves_per_step=4, include_nospec=False
+    )
+    est = estimate_session_minutes(steps, LAUNCHES)
+    by_policy = {row["policy"]: row for row in est["per_policy"]}
+    assert by_policy["sglang_adaptive"]["tiers"] > by_policy["static_k1"]["tiers"]
+    assert (
+        by_policy["sglang_adaptive"]["startup_s"] > by_policy["static_k1"]["startup_s"]
+    )
+
+
+def test_estimate_breakdown_covers_every_policy():
+    from heterospec.session import estimate_session_minutes
+
+    steps = build_session_plan(LAUNCHES, ks=[1], concurrencies=[8], waves_per_step=4)
+    est = estimate_session_minutes(steps, LAUNCHES)
+    assert est["n_servers"] == len(est["per_policy"])
+    assert est["n_runs"] == len(steps)
+    assert est["assumptions"]["pessimistic_multiplier"] == 1.6
+
+
+def test_estimate_is_json_serialisable():
+    import json
+
+    from heterospec.session import estimate_session_minutes
+
+    steps = build_session_plan(LAUNCHES, ks=[1], concurrencies=[8], waves_per_step=4)
+    assert json.loads(json.dumps(estimate_session_minutes(steps, LAUNCHES)))

@@ -382,3 +382,78 @@ def test_cli_dry_run(tmp_path, capsys):
     )
     assert rc == 0
     assert not list(tmp_path.glob("*"))
+
+
+# ---------------------------------------------------------------------------
+# Warm-up
+# ---------------------------------------------------------------------------
+
+
+def test_warmup_sends_the_requested_number_and_reports_counts(server):
+    from heterospec.runner import warmup_server
+    from heterospec.workloads import build_plan
+
+    specs = build_plan("mixed_50_50", 12, seed=0)
+    ok, failed = warmup_server(server.base_url, specs, concurrency=4, num_requests=8)
+    assert ok == 8, f"{ok} ok, {failed} failed"
+    assert failed == 0
+
+
+def test_warmup_zero_requests_is_a_noop(server):
+    from heterospec.runner import warmup_server
+    from heterospec.workloads import build_plan
+
+    assert warmup_server(server.base_url, build_plan("high", 4), num_requests=0) == (
+        0,
+        0,
+    )
+
+
+def test_warmup_rejects_empty_specs(server):
+    from heterospec.runner import warmup_server
+
+    with pytest.raises(ValueError, match="at least one request spec"):
+        warmup_server(server.base_url, [], num_requests=4)
+
+
+def test_warmup_rejects_bad_concurrency(server):
+    from heterospec.runner import warmup_server
+    from heterospec.workloads import build_plan
+
+    with pytest.raises(ValueError, match="concurrency"):
+        warmup_server(server.base_url, build_plan("high", 4), concurrency=0)
+
+
+def test_warmup_handles_more_requests_than_specs(server):
+    """Prompts are cycled, not exhausted."""
+    from heterospec.runner import warmup_server
+    from heterospec.workloads import build_plan
+
+    specs = build_plan("high", 2, seed=0)
+    ok, _ = warmup_server(server.base_url, specs, concurrency=8, num_requests=16)
+    assert ok == 16
+
+
+def test_warmup_rids_never_collide_with_measured_rids(server, tmp_path):
+    """Warm-up must be untraceable in the results, not merely discarded."""
+    from heterospec.runner import warmup_server
+    from heterospec.workloads import build_plan
+
+    specs = build_plan("mixed_50_50", 16, seed=0)
+    warmup_server(server.base_url, specs, concurrency=4, num_requests=8)
+
+    r = run_benchmark(_cfg(server, tmp_path, num_requests=16, concurrency=4))
+    assert len(r.records) == 16
+    assert not any(rec.rid.startswith("warmup-") for rec in r.records)
+    assert r.aggregate["n_ok"] == 16
+
+
+def test_warmup_failures_are_reported_not_raised():
+    """A dead server should surface as a count, so the caller decides."""
+    from heterospec.runner import warmup_server
+    from heterospec.workloads import build_plan
+
+    ok, failed = warmup_server(
+        "http://127.0.0.1:1", build_plan("high", 4), num_requests=3, timeout_s=2.0
+    )
+    assert ok == 0 and failed == 3

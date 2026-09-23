@@ -19,7 +19,7 @@ results/
 `metadata.json` must record at minimum:
 
 ```text
-sglang_commit, sglang_dirty (bool)
+base_sha, experiment_patch_sha, working_tree_dirty, sglang_branch
 gpu, cuda_version, torch_version
 model, draft_model
 speculation: algorithm, eagle_topk, num_steps, num_draft_tokens, adaptive (bool)
@@ -30,14 +30,39 @@ workload family + prompt class composition
 harness_version
 ```
 
+## Provenance is three separate facts
+
+A run is reproducible when **which code produced it** is recorded exactly and
+nothing was uncommitted. That is three statements, and conflating them is how a
+reproducibility story goes wrong:
+
+| Field | Meaning |
+| --- | --- |
+| `base_sha` | the pinned upstream commit this project baselines on |
+| `experiment_patch_sha` | the actual SGLang HEAD during the run |
+| `working_tree_dirty` | whether uncommitted edits were present |
+
+A **clean checkout of a known research patch is citable**: `base_sha +
+experiment_patch_sha` names it precisely. Session 1 runs the
+`heterospec/iter-telemetry` branch, which is deliberately *not* the base, and
+those runs are legitimate results.
+
+An earlier version of this rule treated "HEAD != pinned base" as non-citable,
+which would have marked every Session 1 result unusable — by the project's own
+tooling. Only uncommitted changes are disqualifying.
+
 ## Hard rules
 
-1. **No run is valid without a clean tree.** If `git status --porcelain` is
-   non-empty in the SGLang checkout, the run is tagged `dirty: true` and is not
-   citable in the README results table.
-2. **Never compare runs from different commits** unless the README says so
-   explicitly and records both.
+1. **No run with `working_tree_dirty: true` is citable.** The exact code cannot be
+   reconstructed. `RunMetadata.citable()` enforces this and records the reason.
+2. **Never compare runs from different `experiment_patch_sha` values** unless the
+   README says so explicitly and records both.
 3. **Never report `P(A_k)` derived from a histogram collected under a varying
    K.** See README §4. Static-K captures only, or use the iteration trace.
-4. Negative and control results are kept, not deleted. A null result is a
+4. **No run from a mock server is citable.** `citable()` refuses it outright.
+5. Negative and control results are kept, not deleted. A null result is a
    deliverable (PROJECT.md "Definition of done" item 12).
+6. **Every calibration server runs with `--disable-radix-cache`.** Prefix caching
+   is not a variable under study, and the grid reuses the same seeded prompt pool
+   across concurrencies on one server, so a warm cache would make later runs look
+   cheaper and contaminate the batch-size axis of the cost model.

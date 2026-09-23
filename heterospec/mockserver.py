@@ -273,6 +273,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         srv = self.server
+        if getattr(srv, "fail_generate", False):
+            self._send(500, {"error": "stub configured to fail /generate"})
+            return
         prompt = req.get("text") or ""
         rid = req.get("rid") or f"mock-{next(srv.counter)}"  # type: ignore[attr-defined]
         sampling = req.get("sampling_params") or {}
@@ -362,7 +365,24 @@ class MockSGLangServer:
         self._httpd.next_k = self._next_k  # type: ignore[attr-defined]
         self._httpd.active_k = k if k is not None else k_schedule[0]  # type: ignore[attr-defined]
         self._httpd.last_accept_length = 0.0  # type: ignore[attr-defined]
+        # Read by the handler; exposed via the `fail_generate` property.
+        self._httpd.fail_generate = False  # type: ignore[attr-defined]
         self._thread: threading.Thread | None = None
+
+    # -- fault injection -----------------------------------------------------
+
+    @property
+    def fail_generate(self) -> bool:
+        """When true, `/generate` returns 500 while `/health` stays OK.
+
+        Lets tests exercise the "server is up but not serving" path, which is the
+        one that would otherwise silently produce a cost model built on failures.
+        """
+        return bool(self._httpd.fail_generate)  # type: ignore[attr-defined]
+
+    @fail_generate.setter
+    def fail_generate(self, value: bool) -> None:
+        self._httpd.fail_generate = bool(value)  # type: ignore[attr-defined]
 
     # -- active K ------------------------------------------------------------
 

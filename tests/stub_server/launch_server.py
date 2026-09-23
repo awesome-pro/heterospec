@@ -60,6 +60,10 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     server = MockSGLangServer(port=args.port, k=max(1, args.speculative_num_steps))
+    # Test hook: answer /health but fail /generate, to exercise the orchestrator's
+    # "server is up but not serving" path.
+    if os.environ.get("STUB_FAIL_GENERATE") == "1":
+        server.fail_generate = True
     server.start()
 
     stop = threading.Event()

@@ -28,13 +28,26 @@ result.
 "↑ overstates the gap" means the assumption makes the synthetic number look
 *better* than reality; "↓ understates" means reality could be better.
 
-### A1. Cost model is a placeholder
+### A1. The cost model — placeholder now, and a proxy even when measured
 
 `LinearCostModel(alpha=1.0, beta=0.35, gamma=0.0)`: cost depends linearly on `K`
-and **not at all on batch size**. Real decode rounds have a fixed cost amortised
-over the batch, and `K` enters nonlinearly. → **direction unknown.** This is the
-single biggest reason the number is not yet a result. *Tested by:* the
-calibration grid (Session 1, steps 1–12).
+and **not at all on batch size**. → **direction unknown.** This alone is why the
+number is not yet a result. *Tested by:* the calibration grid (Session 1).
+
+That grid replaces the placeholder with a *measured* surface, but the measured one
+is still an **effective serving cost proxy at concurrency `n`**, not a model-step
+cost, for two reasons:
+
+* `n` is *client concurrency*. The real decode batch size decays within a wave as
+  requests finish (32 → 27 → 23 → …), so `n` overstates the depth of most rounds.
+* Wall time includes prefill, HTTP overhead, scheduler gaps, EOS variation and
+  queue transitions — not just the target/draft decode steps.
+
+That is sufficient for a go/no-go screen, which is all Session 1 is. It is **not**
+sufficient to defend a headline number in the 3–5% band; there the result lives or
+dies on a few percentage points, and cost must be measured directly (SGLang exposes
+serving metrics and profiling) rather than inferred from client throughput. See
+the conditional rule in §4.
 
 ### A2. `P(position k accepted)` is invariant to `K` — **the load-bearing one**
 
@@ -133,6 +146,22 @@ Since the oracle optimisms all point the same way, the synthetic ~1% should be
 treated as a **ceiling that is more likely to fall than to rise.** The honest
 expectation going into Session 1 is that the real gap is *smaller* than 1%.
 
+### Controls applied in Session 1
+
+Distinct from the assumptions above, these are measurement confounders that are
+now **controlled by construction** rather than left to hope:
+
+| Confounder | Control | Why it matters |
+| --- | --- | --- |
+| Prefix/radix cache state | every server launches with `--disable-radix-cache` | The grid reuses one seeded prompt pool across concurrencies on one server. A warming cache would make later runs look cheaper and contaminate the batch-size axis — the same direction a real `gamma > 0` would produce, so the two would be indistinguishable. |
+| Cold-start runtime paths | untimed warm-up at each step's own concurrency, discarded | `/health`-ready does not mean Triton kernels, allocator growth and lazy runtime paths for the measured shapes are warm. At a 1–3% effect size this is not a rounding error. |
+| Tracer overhead on timed runs | tracing enabled **only** for the adaptive capture | The tracer does synchronous JSON work once per decode iteration. Calibration produces the cost model, i.e. the oracle's denominator, and its oracle input comes from `meta_info`, not the trace. |
+| Traced-vs-untraced throughput comparison | adaptive capture is a *diagnostic*, not the adaptive-throughput baseline | Comparing a traced adaptive run against untraced static runs would not be a fair performance comparison. If HeteroSpec survives Session 2, the performance baselines are rerun with tracing off. |
+
+Note that `--disable-radix-cache` lowers *absolute* throughput, so absolute numbers
+from this session are not comparable with a cache-enabled run. Only the ratios this
+project uses are — which is also why `Cost(K, n)` must be read as a relative proxy.
+
 ---
 
 ## 3. What could make the real gap *larger* than 1%
@@ -166,11 +195,39 @@ Fixed **before** seeing Session 1 data, so the result cannot be rationalised aft
 the fact. "Repeatable" means consistent in sign across the static-K captures and
 the adaptive capture, and across concurrencies.
 
+### Step 0 — the K-invariance gate, before reading the gap at all
+
+Every level evaluates `E[acc | K]` at depths a request may never have run, which is
+only valid if assumption A2 holds. So the check runs **first**, and:
+
+```text
+k_invariance FAIL          ->  gap uninterpretable. No-go, whatever its size.
+k_invariance NOT ASSESSED  ->  fewer than two static depths usable. Fix and rerun.
+k_invariance PASS          ->  proceed to the gap below.
+```
+
+Reporting a gap without this check would be reporting a number that may not mean
+anything.
+
+### Then the gap
+
 | Measured real recoverable gap | Decision |
 | --- | --- |
 | `< 2%` | **No-go.** Do not build the policy. Publish the negative result. |
-| `2–3%` | **Marginal.** Report honestly; pursue only if the mechanism is unusually clean and the cost model is tight. |
-| `> 3–5%` | **Pursue.** Implement HeteroSpec as an `AdaptiveSpecPolicy`. |
+| `2–3%` | **Marginal.** Report honestly; pursue only if the mechanism is unusually clean. |
+| `3–5%` | **Validate the cost model first.** The proxy is not precise enough to defend a number in this band; measure server-side step timing before claiming anything. |
+| `> 5%` | **Pursue**, but only after the Session 2 confirmation below. |
+
+### Session 2 — confirm before implementing
+
+Session 1 screens on `mixed_50_50`, a *deliberately heterogeneous synthetic*
+mixture. That is the right first target: if even a purpose-built mixture yields
+`<2%`, the project is dead and nothing else needs measuring.
+
+But a positive result could be an artifact of that mixture. So before implementing
+HeteroSpec, run a smaller Session 2 on `real_mixed` and `phase_shift` and confirm
+the phenomenon survives outside the constructed population. This keeps the
+expensive part of the project gated on evidence rather than momentum.
 
 Regardless of outcome, these are unaffected and remain worth doing:
 

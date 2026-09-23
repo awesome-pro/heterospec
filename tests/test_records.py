@@ -208,7 +208,12 @@ def test_min_k_proposed_empty():
 # ---------------------------------------------------------------------------
 
 
-def _meta(dirty, commit=SGLANG_BASE_COMMIT) -> RunMetadata:
+#: A clean research-patch commit, i.e. NOT the pinned base. Session 1 runs on a
+#: branch like this, so it must be citable.
+_PATCH_SHA = "f9281ec128" + "a" * 30
+
+
+def _meta(dirty, commit=SGLANG_BASE_COMMIT, branch="heterospec/base") -> RunMetadata:
     return RunMetadata.new(
         run_id="t",
         policy_id="static_k3",
@@ -217,7 +222,7 @@ def _meta(dirty, commit=SGLANG_BASE_COMMIT) -> RunMetadata:
             "sglang_git": {
                 "commit": commit,
                 "dirty": dirty,
-                "branch": "heterospec/base",
+                "branch": branch,
             }
         },
     )
@@ -226,11 +231,12 @@ def _meta(dirty, commit=SGLANG_BASE_COMMIT) -> RunMetadata:
 def test_clean_pinned_commit_is_citable():
     ok, reason = _meta(False).citable()
     assert ok, reason
+    assert "pinned base" in reason
 
 
 def test_dirty_tree_is_not_citable():
     ok, reason = _meta(True).citable()
-    assert not ok and "dirty" in reason
+    assert not ok and "uncommitted" in reason
 
 
 def test_unknown_dirty_state_is_not_citable():
@@ -243,9 +249,42 @@ def test_unknown_commit_is_not_citable():
     assert not ok and "unknown" in reason
 
 
-def test_commit_mismatch_is_not_citable():
-    ok, reason = _meta(False, commit="0" * 40).citable()
-    assert not ok and "differs from pinned base" in reason
+def test_clean_research_patch_is_citable_off_base():
+    """The whole point of the three-part model.
+
+    Session 1 runs the telemetry branch, which is deliberately NOT the pinned
+    base. Treating "off base" as non-citable would have marked every Session 1
+    result unusable -- by the project's own tooling.
+    """
+    ok, reason = _meta(False, commit=_PATCH_SHA).citable()
+    assert ok, reason
+    assert "experiment patch" in reason
+    assert _PATCH_SHA[:12] in reason
+
+
+def test_off_base_run_reports_base_and_patch_separately():
+    m = _meta(False, commit=_PATCH_SHA)
+    assert m.base_sha == SGLANG_BASE_COMMIT
+    assert m.experiment_patch_sha == _PATCH_SHA
+    assert m.working_tree_dirty is False
+    assert m.runs_on_pinned_base is False
+    assert m.sglang_branch == "heterospec/base"
+
+
+def test_runs_on_pinned_base_is_true_for_the_base_commit():
+    m = _meta(False)
+    assert m.runs_on_pinned_base is True
+    assert m.commit_mismatch() is False
+
+
+def test_provenance_is_surfaced_at_top_level():
+    """metadata.json must be readable without unpacking `environment`."""
+    d = _meta(False, commit=_PATCH_SHA).to_dict()
+    assert d["base_sha"] == SGLANG_BASE_COMMIT
+    assert d["experiment_patch_sha"] == _PATCH_SHA
+    assert d["working_tree_dirty"] is False
+    assert d["runs_on_pinned_base"] is False
+    assert d["citable"] is True
 
 
 def test_to_dict_includes_citability_verdict():

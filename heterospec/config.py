@@ -108,6 +108,7 @@ class ModelConfig:
     mem_fraction_static: float = 0.7
     cuda_graph_max_bs_decode: int = 64
     cuda_graph_backend_prefill: str = "disabled"
+    disable_radix_cache: bool = True
     extra_args: list[str] = field(default_factory=list)
 
     @classmethod
@@ -218,6 +219,14 @@ class LaunchConfig:
             str(m.cuda_graph_max_bs_decode),
             f"--cuda-graph-backend-prefill={m.cuda_graph_backend_prefill}",
         ]
+        if m.disable_radix_cache:
+            # Prefix caching is not a variable under study, and the calibration
+            # grid reuses the same seeded prompt pool across concurrencies on one
+            # server. Without this, later runs in a sequence would hit a warm
+            # prefix cache and appear cheaper than earlier ones, contaminating
+            # the batch-size axis of the cost model. SGLang's own benchmarks pass
+            # this flag for the same reason.
+            args.append("--disable-radix-cache")
         if self.enable_metrics:
             args.append("--enable-metrics")
         args.extend(m.extra_args)
@@ -263,6 +272,7 @@ class LaunchConfig:
                 "mem_fraction_static": self.model.mem_fraction_static,
                 "cuda_graph_max_bs_decode": self.model.cuda_graph_max_bs_decode,
                 "cuda_graph_backend_prefill": (self.model.cuda_graph_backend_prefill),
+                "disable_radix_cache": self.model.disable_radix_cache,
                 "extra_args": list(self.model.extra_args),
             },
             "spec": None
