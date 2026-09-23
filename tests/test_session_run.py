@@ -574,3 +574,45 @@ def test_the_adaptive_server_does_get_the_trace_env_var(tmp_path, port):
     )
     assert "SGLANG_HETEROSPEC_TRACE" in env
     assert env["SGLANG_HETEROSPEC_TRACE"].endswith("trace_sglang_adaptive.jsonl")
+
+
+# ---------------------------------------------------------------------------
+# Config-recorded environment
+# ---------------------------------------------------------------------------
+
+
+def test_the_config_recorded_env_reaches_the_server_process(tmp_path, port):
+    """The EAGLE3 pair cannot start at all without this variable.
+
+    SGLang's `ModelConfig._derive_context_length` raises when the draft head's
+    `max_position_embeddings` (2048) is below the target's context length
+    (131072). That kills the scheduler's draft worker; SGLang then tears down its
+    own process tree and the launcher dies with SIGKILL, which on a rented host
+    looks exactly like an OOM kill -- it cost a session to diagnose, because the
+    real error is buried under "server exited early with code -9".
+
+    The setting therefore lives in the launch config, so a re-run from the config
+    alone reproduces the launch instead of silently depending on an exported
+    shell variable.
+    """
+    env = _child_env_for(
+        tmp_path,
+        port,
+        SessionStep("static_k1", 8, "mixed_50_50", 48, 0, "calibration", 1),
+    )
+    assert env.get("SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN") == "1", (
+        "the server would refuse to build the EAGLE3 draft worker without this"
+    )
+
+
+def test_the_required_env_is_recorded_in_the_result_metadata():
+    """It must be in `metadata.json`, not only in the process environment.
+
+    A reader has to be able to see that the run needed it; the config's `to_dict`
+    is what lands in the per-run metadata.
+    """
+    for policy_id, cfg in LAUNCHES.items():
+        recorded = cfg.to_dict()["model"]["env"]
+        assert recorded.get("SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN") == "1", (
+            f"{policy_id} would not record the required env var"
+        )

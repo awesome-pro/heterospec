@@ -377,6 +377,7 @@ PR 1 must not be opened until they pass.
 | Bootstrap says `working tree is DIRTY` | Uncommitted edits in the fork | Results would not be citable — tell me |
 | `python ... outside requires-python` | Image has Python 3.10 or 3.13 | Re-deploy with a 3.12 image |
 | Download fails on the Llama model | Licence not accepted or no token | Redo Phase 3 |
+| `server exited early with code -9` | **Not necessarily an OOM.** SGLang kills its own process tree when a child fails, so a Python exception surfaces as SIGKILL | `grep -i "Traceback\|ValueError\|sigquit" results/session1/logs/server_*.log`. A `ValueError` about context length means the EAGLE3 override is missing — it is set by `model.env` in the launch config, so check you pulled the latest config |
 | OOM during server launch | Disk/GPU too small, or wrong config | Check 48 GB GPU and `mem_fraction_static` |
 | `no session report at ...` | Session did not finish | Send me the pod's terminal output |
 | Bootstrap exits with "problems" | A preflight check failed | **Send me the output** — do not push on |

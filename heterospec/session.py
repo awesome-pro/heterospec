@@ -442,7 +442,9 @@ def run_session(
             log_path=logs_dir / f"server_{policy_id}.log",
             python_exe=python_exe,
             trace_path=trace_path,
-            env_extra=env_extra,
+            # Config-recorded env wins over the caller's: the launch config is
+            # the authority on what this model pair needs to start at all.
+            env_extra={**(env_extra or {}), **dict(getattr(launch.model, "env", {}))},
             launcher_module=launcher_module,
         )
 

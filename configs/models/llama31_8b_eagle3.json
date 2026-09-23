@@ -9,7 +9,10 @@
     "cuda_graph_max_bs_decode": 64,
     "cuda_graph_backend_prefill": "disabled",
     "disable_radix_cache": true,
-    "extra_args": []
+    "extra_args": [],
+    "env": {
+      "SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN": "1"
+    }
   },
   "launches": [
     {
@@ -82,5 +85,6 @@
       "Quantized target (e.g. AWQ-INT4) would fit 24 GB but changes acceptance behaviour and adds a confounder -- use only as an explicitly-labelled secondary check, never as the primary pair.",
       "Reduce cuda_graph_max_bs_decode to 32 to cut graph memory if VRAM is tight."
     ]
-  }
+  },
+  "_env_note": "SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1 is REQUIRED for this target+draft pair, not an optimisation. The EAGLE3 draft head declares max_position_embeddings=2048 while the target declares 131072, and SGLang's ModelConfig._derive_context_length raises ValueError on that mismatch unless this is set -- which kills the scheduler's draft worker, after which SGLang kills its own process tree and the launcher dies with SIGKILL (exit -9), looking exactly like an OOM. SGLang's own EAGLE3 fixture sets it too (python/sglang/test/server_fixtures/spec_eagle_fixture.py:144), and CI is exempted via is_in_ci(), which is why upstream tests pass without it. It is recorded here so the launch is reproducible from the config alone rather than depending on an exported shell variable."
 }

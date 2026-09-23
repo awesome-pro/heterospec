@@ -110,6 +110,13 @@ class ModelConfig:
     cuda_graph_backend_prefill: str = "disabled"
     disable_radix_cache: bool = True
     extra_args: list[str] = field(default_factory=list)
+    env: dict[str, str] = field(default_factory=dict)
+    """Environment variables the server process requires.
+
+    Recorded rather than left to the ambient shell, because a launch that only
+    works when someone remembers to `export` something is not reproducible from
+    the config. See the EAGLE3 entry in this file's JSON for the one that matters.
+    """
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ModelConfig:
@@ -274,6 +281,7 @@ class LaunchConfig:
                 "cuda_graph_backend_prefill": (self.model.cuda_graph_backend_prefill),
                 "disable_radix_cache": self.model.disable_radix_cache,
                 "extra_args": list(self.model.extra_args),
+                "env": dict(self.model.env),
             },
             "spec": None
             if self.spec is None

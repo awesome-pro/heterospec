@@ -332,3 +332,17 @@ def test_load_launch_configs_ignores_top_level_metadata_keys():
     assert "_hardware_note" in raw  # present in the file...
     launches = load_launch_configs(MODEL_CONFIG)  # ...but must not break loading
     assert len(launches) == 6
+
+
+def test_both_model_configs_carry_the_required_eagle3_env():
+    """Every launch config, not just the 48 GB one.
+
+    The A100 40 GB variant runs the same target+draft pair, so it needs the same
+    variable; a divergence between the two would only show up on the GPU host.
+    """
+    for name in ("llama31_8b_eagle3.json", "llama31_8b_eagle3_a100_40gb.json"):
+        path = REPO_ROOT / "configs" / "models" / name
+        for cfg in load_launch_configs(path):
+            assert (
+                cfg.model.env.get("SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN") == "1"
+            ), f"{name}:{cfg.id} is missing the EAGLE3 context-length override"
