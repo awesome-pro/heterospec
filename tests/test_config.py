@@ -25,7 +25,9 @@ from heterospec.config import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MODEL_CONFIG = REPO_ROOT / "configs" / "models" / "llama31_8b_eagle3.json"
+MODEL_CONFIG_DIR = REPO_ROOT / "configs" / "models"
 ADAPTIVE_DIR = REPO_ROOT / "configs" / "adaptive"
+ALL_MODEL_CONFIGS = sorted(MODEL_CONFIG_DIR.glob("*.json"))
 
 
 # ---------------------------------------------------------------------------
@@ -35,6 +37,44 @@ ADAPTIVE_DIR = REPO_ROOT / "configs" / "adaptive"
 
 def test_model_config_file_exists():
     assert MODEL_CONFIG.is_file()
+
+
+@pytest.mark.parametrize("path", ALL_MODEL_CONFIGS, ids=lambda p: p.name)
+def test_every_shipped_model_config_is_valid(path):
+    """Every configuration shipped must load and pass adaptive-eligibility.
+
+    Hardware-specific variants (e.g. a 40GB card) drift out of sync easily; this
+    keeps them honest.
+    """
+    launches = load_launch_configs(path)
+    assert launches, f"{path.name} defines no launches"
+    for launch in launches:
+        launch.validate()
+        args = launch.to_cli_args()
+        assert "--model-path" in args
+
+
+@pytest.mark.parametrize("path", ALL_MODEL_CONFIGS, ids=lambda p: p.name)
+def test_every_shipped_model_config_pins_the_same_model_pair(path):
+    """Hardware variants may differ in memory settings, never in the model."""
+    for launch in load_launch_configs(path):
+        assert launch.model.target == "meta-llama/Llama-3.1-8B-Instruct"
+        assert launch.model.draft == "lmsys/sglang-EAGLE3-LLaMA3.1-Instruct-8B"
+        assert launch.model.dtype == "float16"
+        assert launch.model.attention_backend == "triton"
+
+
+@pytest.mark.parametrize("path", ALL_MODEL_CONFIGS, ids=lambda p: p.name)
+def test_every_shipped_model_config_offers_the_same_policies(path):
+    ids = {c.id for c in load_launch_configs(path)}
+    assert ids == {
+        "no_spec",
+        "static_k1",
+        "static_k3",
+        "static_k5",
+        "static_k7",
+        "sglang_adaptive",
+    }
 
 
 def test_all_shipped_launches_validate():

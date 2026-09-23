@@ -1,0 +1,84 @@
+{
+  "_comment": "Session 1 variant for a 40GB card (A100 40GB). Identical to the primary config except for memory settings, which are the only thing that must change on smaller VRAM. Use the primary config on 48GB+.",
+  "_vram_math": {
+    "weights_fp16_gb": 16.1,
+    "draft_eagle3_gb": 1.5,
+    "static_weights_total_gb": 17.6,
+    "mem_fraction_static_0.85_on_40gb_gb": 34.0,
+    "remaining_for_kv_and_graphs_gb": 16.4,
+    "why_not_24gb": "0.7 * 24 = 16.8 GB, which is LESS than the 17.6 GB of static weights, so the server OOMs before any KV cache is allocated. Lowering mem_fraction_static does not help: the weights are the weights."
+  },
+  "model": {
+    "target": "meta-llama/Llama-3.1-8B-Instruct",
+    "draft": "lmsys/sglang-EAGLE3-LLaMA3.1-Instruct-8B",
+    "dtype": "float16",
+    "attention_backend": "triton",
+    "mem_fraction_static": 0.85,
+    "cuda_graph_max_bs_decode": 32,
+    "cuda_graph_backend_prefill": "disabled",
+    "extra_args": []
+  },
+  "launches": [
+    {
+      "id": "no_spec",
+      "description": "Absolute target-only baseline. No draft model, no speculation.",
+      "spec": null
+    },
+    {
+      "id": "static_k1",
+      "description": "Shallow speculation, static K=1.",
+      "spec": {
+        "algorithm": "EAGLE3",
+        "num_steps": 1,
+        "num_draft_tokens": 2,
+        "eagle_topk": 1,
+        "adaptive": false
+      }
+    },
+    {
+      "id": "static_k3",
+      "description": "Medium speculation, static K=3.",
+      "spec": {
+        "algorithm": "EAGLE3",
+        "num_steps": 3,
+        "num_draft_tokens": 4,
+        "eagle_topk": 1,
+        "adaptive": false
+      }
+    },
+    {
+      "id": "static_k5",
+      "description": "Static K=5, a default adaptive ladder tier.",
+      "spec": {
+        "algorithm": "EAGLE3",
+        "num_steps": 5,
+        "num_draft_tokens": 6,
+        "eagle_topk": 1,
+        "adaptive": false
+      }
+    },
+    {
+      "id": "static_k7",
+      "description": "Aggressive speculation, static K=7.",
+      "spec": {
+        "algorithm": "EAGLE3",
+        "num_steps": 7,
+        "num_draft_tokens": 8,
+        "eagle_topk": 1,
+        "adaptive": false
+      }
+    },
+    {
+      "id": "sglang_adaptive",
+      "description": "Merged SGLang adaptive controller, built-in default ladder. Also the run that validates the iteration trace patch on real hardware.",
+      "spec": {
+        "algorithm": "EAGLE3",
+        "num_steps": 3,
+        "num_draft_tokens": 4,
+        "eagle_topk": 1,
+        "adaptive": true,
+        "adaptive_config": null
+      }
+    }
+  ]
+}
