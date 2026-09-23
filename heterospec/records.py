@@ -289,8 +289,11 @@ class RunMetadata:
         """Whether this run may appear in README results tables.
 
         Encodes results/README.md rule 1: no dirty runs, and the commit must be
-        known.
+        known. Mock runs are refused outright -- synthetic data must never reach
+        a results table by accident.
         """
+        if self.is_mock:
+            return False, "server was a mock; synthetic data is not a result"
         if self.sglang_dirty is None:
             return False, "SGLang git state unknown (not a checkout?)"
         if self.sglang_dirty:
@@ -304,6 +307,14 @@ class RunMetadata:
                 f"explicitly"
             )
         return True, "clean tree at pinned commit"
+
+    @property
+    def is_mock(self) -> bool:
+        """Whether the results came from `heterospec.mockserver`."""
+        if self.server.get("mode") == "mock":
+            return True
+        # Belt and braces: also trust the server's own /server_info flag.
+        return bool((self.server.get("server_info") or {}).get("mock"))
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
