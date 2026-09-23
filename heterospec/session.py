@@ -203,6 +203,7 @@ class ServerProcess:
         python_exe: str = sys.executable,
         trace_path: Path | None = None,
         env_extra: dict[str, str] | None = None,
+        launcher_module: str = "sglang.launch_server",
     ) -> None:
         self.launch = launch
         self.sglang_path = Path(sglang_path)
@@ -211,6 +212,7 @@ class ServerProcess:
         self.python_exe = python_exe
         self.trace_path = trace_path
         self.env_extra = dict(env_extra or {})
+        self.launcher_module = launcher_module
         self._proc: subprocess.Popen | None = None
         self._log = None
 
@@ -228,7 +230,7 @@ class ServerProcess:
             host="127.0.0.1",
             enable_metrics=self.launch.enable_metrics,
         )
-        return [self.python_exe, "-m", "sglang.launch_server", *launch.to_cli_args()]
+        return [self.python_exe, "-m", self.launcher_module, *launch.to_cli_args()]
 
     def start(self) -> ServerProcess:
         import os
@@ -340,6 +342,8 @@ def run_session(
     dispatch: str = "waves",
     on_event: Callable[[str], None] | None = None,
     collect_trace: bool = True,
+    env_extra: dict[str, str] | None = None,
+    launcher_module: str = "sglang.launch_server",
 ) -> list[StepResult]:
     """Execute a session plan, one server launch per policy.
 
@@ -347,6 +351,13 @@ def run_session(
     per-tier CUDA graphs takes minutes, so restarting per concurrency would waste
     most of the session. Steps are grouped by policy and run in plan order within
     each group.
+
+    `env_extra` is forwarded to every server process. On a rented host this is
+    needed for `HF_HOME` (so weights come off the persistent volume instead of
+    being re-downloaded) and for `HF_TOKEN` on gated models.
+
+    `launcher_module` exists so this orchestration can be exercised against a stub
+    server in tests. On real hardware it is always SGLang's launcher.
     """
     results: list[StepResult] = []
 
@@ -359,8 +370,29 @@ def run_session(
             on_event(msg)
 
     for policy_id, group in by_policy.items():
-        launch = launches[policy_id]
+        launch = launches.get(policy_id)
+        if launch is None:
+            # An unresolvable policy must fail its own steps, not abort the
+            # session. Losing the whole paid run to one bad plan entry is the
+            # expensive failure mode. (Found by a test: this lookup used to sit
+            # outside any error handling.)
+            available = sorted(launches)
+            for step in group:
+                results.append(
+                    StepResult(
+                        step=step,
+                        ok=False,
+                        error=(
+                            f"no launch config for policy {policy_id!r}; "
+                            f"available: {available}"
+                        ),
+                    )
+                )
+            log(f"\n=== server: {policy_id} -> SKIPPED (no launch config) ===")
+            continue
+
         log(f"\n=== server: {policy_id} ({len(group)} runs) ===")
+        first_in_group = True
 
         for step in group:
             trace_path = (
@@ -375,8 +407,13 @@ def run_session(
                 log_path=logs_dir / f"server_{policy_id}_c{step.concurrency}.log",
                 python_exe=python_exe,
                 trace_path=trace_path,
+                env_extra=env_extra,
+                launcher_module=launcher_module,
             )
-            log(f"  {step.describe()} -> launching")
+            # Steps under one policy share a server, so "launching" belongs to
+            # the policy, not the step. Saying "launching" per step was
+            # misleading about where the wall time actually goes.
+            log(f"  {step.describe()} -> running")
             t0 = time.perf_counter()
             try:
                 server.start()
@@ -385,6 +422,9 @@ def run_session(
                         f"server not ready within {server_timeout_s}s\n"
                         + server.tail_log()
                     )
+                if first_in_group:
+                    log(f"  server ready: {policy_id} @ {server.base_url}")
+                    first_in_group = False
                 cfg = RunConfig(
                     workload=step.workload,
                     policy_id=f"{step.policy_id}_c{step.concurrency}",

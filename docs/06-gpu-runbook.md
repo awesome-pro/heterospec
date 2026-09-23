@@ -67,20 +67,33 @@ set `HF_TOKEN` first, or the session dies at the first server launch.
 ## 4. Get the code onto the host
 
 ```bash
+export HF_HOME=/workspace/hf      # weights live on the volume, not the container
+
 cd /workspace
 # the fork, on the telemetry branch (the trace patch lives there)
 git clone --branch heterospec/iter-telemetry \
     https://github.com/awesome-pro/sglang.git sglang
 # the harness
 git clone https://github.com/awesome-pro/heterospec.git heterospec
+
+# SGLang itself
 pip install -e /workspace/sglang/python
+# ...and the harness, which brings requests/numpy/pandas/matplotlib/scipy.
+# Without this, `python -m heterospec.session` only works from the repo root,
+# because `python -m` happens to put the cwd on sys.path.
+pip install -e /workspace/heterospec
 ```
 
-Verify the trace patch survived the clone:
+Verify both, before spending anything:
 
 ```bash
-grep -c heterospec_trace /workspace/sglang/python/sglang/srt/speculative/heterospec_trace.py
+python -c "import sglang, heterospec; print('imports ok')"
+grep -c record_iteration \
+    /workspace/sglang/python/sglang/srt/speculative/heterospec_trace.py
 ```
+
+`HF_HOME` is inherited by every server the session launches, so weights are read
+from the volume rather than re-downloaded per launch.
 
 ## 5. Dry-run the plan (free, and worth doing)
 
