@@ -104,6 +104,46 @@ configured). Everything below is typed in that terminal, on the pod.
 
 **✅ Check:** you have a shell prompt that is *not* your Mac.
 
+### 2a. Run everything inside tmux (do this before Phase 4)
+
+Start tmux **before** the bootstrap and do all the work inside it:
+
+```bash
+apt-get update -qq && apt-get install -y -qq tmux   # only if tmux is missing
+tmux new -s session1
+```
+
+Then run every later phase in that tmux window.
+
+**Why it matters.** The bootstrap plus the session is 1.5–2.5 hours of wall time.
+A pod shell is killed when its terminal goes away, and terminals do go away —
+a closing browser tab, a sleeping laptop, a network blip. If that happens mid-run,
+the process dies with it. tmux keeps the work running on the pod, detached from
+whatever is displaying it.
+
+Two specific consequences of losing the terminal:
+
+* **Mid-bootstrap** (the ~10-minute install): you are left with a half-installed
+  environment and have to work out where it stopped.
+* **Mid-session**: `run_session` writes each completed step's data as it goes, so
+  the finished run directories survive on disk — but `session1_report.json` is
+  only written at the very end. A run killed at step 12 of 16 leaves 12 usable run
+  directories and no report, so `--analyze-only` has nothing to read. You would be
+  re-running the remaining steps to regenerate it.
+
+Cost of the insurance: one command.
+
+| Action | Keys / command |
+| --- | --- |
+| Detach (leave it running) | `Ctrl-b` then `d` |
+| Reattach | `tmux attach -t session1` |
+| List sessions | `tmux ls` |
+| Check the run is alive without attaching | `pgrep -af gpu_session_1` |
+
+> **tmux protects against losing your terminal, not against losing the pod.** The
+> container disk is still erased if the pod is stopped or terminated. Copy the
+> results off (Phase 6) before doing either.
+
 ---
 
 ## Phase 3 — Pre-download the models (~10–15 min, mostly waiting)

@@ -276,10 +276,13 @@ else
   else
     fail "pip install -e $SGLANG_DIR/python failed"
   fi
-  if "$PYTHON" -m pip install --quiet -e "$HETEROSPEC_DIR"; then
-    ok "heterospec installed (with requests/numpy/pandas/matplotlib/scipy)"
+  # [dev] brings pytest, which step 5 needs. Without it every fork test failed
+  # with "No module named pytest" and was reported as a test failure -- four
+  # phantom failures that hid the one real problem.
+  if "$PYTHON" -m pip install --quiet -e "$HETEROSPEC_DIR[dev]"; then
+    ok "heterospec installed (with requests/numpy/pandas/matplotlib/scipy + pytest)"
   else
-    fail "pip install -e $HETEROSPEC_DIR failed"
+    fail "pip install -e $HETEROSPEC_DIR[dev] failed"
   fi
   if "$PYTHON" -c "import sglang, heterospec" >/dev/null 2>&1; then
     ok "both import cleanly"
@@ -316,26 +319,45 @@ else
     cat > /tmp/ht_hfcheck.py <<'PYEOF'
 import os
 import sys
+import tempfile
 
-from huggingface_hub import HfApi
+from huggingface_hub import HfApi, hf_hub_download
+
+try:
+    from huggingface_hub.errors import GatedRepoError
+except ImportError:  # older huggingface_hub
+    from huggingface_hub.utils import GatedRepoError
 
 api = HfApi()
 token = os.environ.get("HF_TOKEN")
+model = sys.argv[1]
+
 try:
     who = api.whoami(token=token)
 except Exception as e:  # noqa: BLE001
     print(f"AUTH_FAILED: {type(e).__name__}: {e}")
-    print("  the token was rejected outright -- check it was copied whole and is not revoked")
+    print("  the token itself was rejected -- check it was copied whole and is not revoked")
     sys.exit(4)
 print(f"authenticated as: {who.get('name', '?')} ({who.get('type', '?')})")
+
+# PROBE AN ACTUAL FILE, NOT model_info().
+# model_info() reads public metadata and SUCCEEDS on a gated repository the account
+# has no access to, so it cannot prove anything. That mistake let this check print
+# "gated-model access: OK" immediately before the download failed with
+# "Access denied. This repository requires approval." Fetching a small file is the
+# only cheap way to test the same permission the download needs.
 try:
-    api.model_info(sys.argv[1], token=token)
+    with tempfile.TemporaryDirectory() as tmp:
+        hf_hub_download(model, "config.json", token=token, cache_dir=tmp)
+except GatedRepoError as e:
+    print(f"ACCESS_DENIED: {e}")
+    print("  the token is valid, but this account has not been granted access.")
+    print("  meta-llama/Llama-3.1-8B-Instruct is gated:manual -- Meta must approve the request.")
+    sys.exit(5)
 except Exception as e:  # noqa: BLE001
     print(f"ACCESS_DENIED: {type(e).__name__}: {e}")
-    print("  the token is valid, but this account cannot see the model.")
-    print("  A 401/403 naming the licence means it has not been accepted on THIS account.")
     sys.exit(5)
-print("gated-model access: OK")
+print("gated access: OK (fetched config.json)")
 PYEOF
     if "$PYTHON" /tmp/ht_hfcheck.py "$TARGET_MODEL" >/tmp/ht_hfcheck.log 2>&1; then
       sed 's/^/       /' /tmp/ht_hfcheck.log
@@ -380,10 +402,14 @@ elif [ -d "$SGLANG_DIR/.git" ]; then
   run_test() {
     local f="$1"
     if [ ! -f "$f" ]; then fail "missing test file $f"; return 0; fi
-    if "$PYTHON" -m pytest -q "$f" >/tmp/ht_$(basename "$f").log 2>&1; then
+    local log="/tmp/ht_$(basename "$f").log"
+    if "$PYTHON" -m pytest -q "$f" >"$log" 2>&1; then
       ok "$(basename "$f")"
     else
-      fail "$(basename "$f") — see /tmp/ht_$(basename "$f").log"
+      fail "$(basename "$f") — see $log"
+      # Print the reason. A bare "see the log" is indistinguishable between a real
+      # assertion failure and the suite never having started (e.g. pytest missing).
+      tail -n 8 "$log" | sed 's/^/       /'
     fi
   }
   # PR 1 lives on a different, independent branch, so it needs its own checkout.
