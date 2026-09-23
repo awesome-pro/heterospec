@@ -326,11 +326,29 @@ elif [ -d "$SGLANG_DIR/.git" ]; then
     fi
   }
   # PR 1 lives on a different, independent branch, so it needs its own checkout.
+  #
+  # The clone is single-branch, but `git clone --branch X` still records
+  # remote-tracking refs for every branch, so `git checkout $PR1_BRANCH` resolves
+  # through origin/<branch> and lands on the right commit. Verified: it yields
+  # 65aaba0418. This fetch makes that explicit rather than relying on DWIM.
+  #
+  # The real hazard is the check below: if the checkout lands somewhere else, the
+  # three "PR 1" files would run against the wrong code and pass anyway. That used
+  # to be a warning; it is now a failure.
+  info "fetching $PR1_BRANCH"
+  if git fetch --quiet origin "$PR1_BRANCH:$PR1_BRANCH" 2>/dev/null; then
+    ok "fetched $PR1_BRANCH"
+  else
+    fail "could not fetch $PR1_BRANCH; PR 1 cannot be verified from here"
+  fi
   info "checking out $PR1_BRANCH for the three PR 1 files"
   git checkout --quiet "$PR1_BRANCH" 2>/dev/null || warn "could not check out $PR1_BRANCH"
   P1="$(git rev-parse HEAD 2>/dev/null || echo '?')"
-  [ "${P1:0:10}" = "$PR1_SHA" ] && ok "PR 1 branch at $PR1_SHA" \
-    || warn "PR 1 branch at ${P1:0:10}, expected $PR1_SHA"
+  if [ "${P1:0:10}" = "$PR1_SHA" ]; then
+    ok "PR 1 branch at $PR1_SHA"
+  else
+    fail "PR 1 branch is at ${P1:0:10}, expected $PR1_SHA -- the three files below would be testing the wrong code"
+  fi
   run_test test/registered/unit/spec/test_adaptive_runtime_state.py
   run_test test/registered/unit/spec/test_adaptive_spec_params.py
   run_test test/registered/unit/managers/test_batch_result_processor_spec_grammar.py
