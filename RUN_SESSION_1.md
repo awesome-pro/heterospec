@@ -18,18 +18,47 @@ expensive mistake available, because it wastes time *and* a re-deploy.
 
 | Setting | Value | Why |
 | --- | --- | --- |
-| GPU | 1× RTX A6000 (48 GB) | ✅ your pick is right |
-| **CUDA version** | **13.0** — *not* 12.8 | The pinned SGLang is built for cu13 |
-| **PyTorch** | **2.13.0**, if offered | The fork pins `torch==2.13.0`; 2.8.0 is wrong |
-| **Container disk** | **100 GB** | 30 GB cannot hold weights + wheels + results |
-| **Network volume** | **100 GB, mounted at `/workspace`** | Add it via "Add volume" |
-| Template | Runpod PyTorch 2.13.0 if it exists, else PyTorch 2.8.0 + CUDA 13.0 | pip will upgrade torch either way |
+| GPU | 1× RTX A6000 (48 GB) | The recommended card |
+| **CUDA version** | **13.0** | The pinned SGLang builds from `cuda:13.0.3` |
+| **Container disk** | **100 GB** | Default 30 GB cannot hold weights + wheels + results |
+| **Volume** | **Network volume, 50 GB, at `/workspace`** | See the sub-steps below |
+| PyTorch | leave the template's version | The bootstrap installs `torch==2.13.0` itself |
 
 Set this environment variable while you are here:
 
 ```text
 HF_HOME=/workspace/hf
 ```
+
+### 1a. Adding the volume (do this *before* deploying)
+
+Clicking **Add volume** opens a **Create storage** dialog. The order matters:
+
+1. Choose **Network volume** ($0.07/GB/mo), *not* Global volume (BETA, $0.09/GB/mo)
+2. Set **size to 50 GB**
+3. Keep the generated name
+4. Click **Create network volume** — the button is labelled after whichever type
+   is selected
+5. You are returned to the deploy screen
+
+Then confirm, *before* clicking **Deploy Pod**:
+
+* the yellow *"Nothing mounted at the template's path"* warning is **gone**
+* the volume is listed as mounted at **`/workspace`**
+* **Container disk is set to 100 GB**
+
+> A network volume is tied to one datacenter, so the pod must be in the same one.
+> If the A6000 is unavailable there, use **Global volume** instead — being
+> region-independent is what it is for, and the beta risk is acceptable at this
+> budget.
+
+> **The PyTorch version on the template does not matter.** If it says 2.8.0, the
+> bootstrap's `pip install -e` replaces it with the pinned 2.13.0. That is another
+> reason the container disk must be 100 GB. Phase 4 prints
+> `ok torch 2.13.0 matches the pin` to confirm.
+
+> **Volume cost is monthly, not hourly:** 50 GB is about $3.50/month if you leave
+> it standing. Delete it once you have finished Session 2.
 
 > **Why the volume matters.** Without it, the ~17 GB of model weights live on the
 > container and are re-downloaded every time you start a pod. With it, you pay the
@@ -41,8 +70,8 @@ HF_HOME=/workspace/hf
 > image, pip drags in newer torch + cu13 kernels and can leave the preinstalled
 > torchvision/flashinfer ABI-mismatched.
 
-**✅ Check:** the pod shows `Running`, and the volume is listed as mounted at
-`/workspace`.
+**✅ Check:** the pod shows `Running`, the volume is mounted at `/workspace`, and
+`nvidia-smi` reports an RTX A6000 with ~48 GB.
 
 ---
 
