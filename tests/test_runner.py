@@ -457,3 +457,133 @@ def test_warmup_failures_are_reported_not_raised():
         "http://127.0.0.1:1", build_plan("high", 4), num_requests=3, timeout_s=2.0
     )
     assert ok == 0 and failed == 3
+
+
+# ---------------------------------------------------------------------------
+# Request-id uniqueness across runs that share a server (and a trace file)
+# ---------------------------------------------------------------------------
+
+
+def test_rid_prefix_distinguishes_every_step_of_a_session_plan():
+    """The bug this pins: `policy_id[:6]` collapsed all adaptive concurrencies.
+
+    A policy's steps share one server process and one trace file, so two runs must
+    never mint the same request id. Truncating the policy id made adaptive_c1,
+    adaptive_c8 and adaptive_c32 all yield the prefix "adapti", so the trace for
+    the adaptive group contained three different requests named "adapti00001" --
+    and a trace whose ids are ambiguous cannot be used to bound K per request,
+    which is the one thing the trace exists for.
+    """
+    from heterospec.config import load_launch_configs
+    from heterospec.runner import rid_prefix_for
+    from heterospec.session import build_session_plan
+
+    launches = {c.id: c for c in load_launch_configs(LAUNCH_CONFIG)}
+    steps = build_session_plan(launches, ks=[1, 3, 5, 7], concurrencies=[1, 8, 32])
+
+    seen: dict[str, str] = {}
+    for step in steps:
+        cfg = RunConfig(
+            workload=step.workload,
+            policy_id=f"{step.policy_id}_c{step.concurrency}",
+            static_k=step.static_k,
+            seed=step.seed,
+            num_requests=step.num_requests,
+        )
+        prefix = rid_prefix_for(cfg)
+        label = f"{step.policy_id}_c{step.concurrency}_k{step.static_k}"
+        assert prefix not in seen, (
+            f"{label} and {seen[prefix]} share the request-id prefix {prefix!r}; "
+            f"they would produce colliding rids"
+        )
+        seen[prefix] = label
+
+
+def test_rid_prefix_is_stable_for_the_same_run():
+    """Uniqueness must not come from randomness: a re-analysis has to agree."""
+    from heterospec.runner import rid_prefix_for
+
+    def cfg():
+        return RunConfig(workload="mixed_50_50", policy_id="adaptive_c8", seed=0)
+
+    assert rid_prefix_for(cfg()) == rid_prefix_for(cfg())
+
+
+def test_measured_rids_are_distinct_across_concurrencies_of_one_policy(
+    server, tmp_path
+):
+    """End-to-end: the same policy at two concurrencies must not collide."""
+    a = run_benchmark(_cfg(server, tmp_path, num_requests=8, concurrency=1))
+    b = run_benchmark(_cfg(server, tmp_path, num_requests=16, concurrency=8))
+    rids_a = {rec.rid for rec in a.records}
+    rids_b = {rec.rid for rec in b.records}
+    assert rids_a and rids_b
+    assert not (rids_a & rids_b), f"colliding rids: {sorted(rids_a & rids_b)[:5]}"
+
+
+class _RecordingClient:
+    """Stands in for `SGLangClient`, recording the rid of every request."""
+
+    def __init__(self, seen: list[str]) -> None:
+        self._seen = seen
+
+    def __call__(self, *a, **kw):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        pass
+
+    def generate(self, prompt, **kw):
+        self._seen.append(kw["rid"])
+
+        class _R:
+            ok = True
+
+        return _R()
+
+
+def test_warmup_rid_prefix_is_honoured_so_steps_can_be_told_apart(monkeypatch):
+    """Warm-up traffic is traced too, so a fixed prefix makes a trace ambiguous.
+
+    Steps in a policy group share one server and therefore one trace file. If every
+    step's warm-up requests are called `warmup-00000`, the trace holds several
+    different requests under one name and cannot be read while debugging an
+    anomaly. Asserts the rid actually reaches the client, which is the only place
+    the prefix has any effect.
+    """
+    from heterospec.runner import warmup_server
+    from heterospec.workloads import build_plan
+
+    seen: list[str] = []
+    monkeypatch.setattr("heterospec.runner.SGLangClient", _RecordingClient(seen))
+    ok, _ = warmup_server(
+        "http://example.invalid",
+        build_plan("mixed_50_50", 8, seed=0),
+        concurrency=4,
+        num_requests=4,
+        rid_prefix="warmup-static_k1-c4",
+    )
+    assert ok == 4
+    assert seen == [f"warmup-static_k1-c4-{i:05d}" for i in range(4)]
+
+
+def test_two_steps_warmup_prefixes_do_not_overlap(monkeypatch):
+    """The concrete collision: two steps of one policy, one server, one trace."""
+    from heterospec.runner import warmup_server
+    from heterospec.workloads import build_plan
+
+    seen: list[str] = []
+    monkeypatch.setattr("heterospec.runner.SGLangClient", _RecordingClient(seen))
+    specs = build_plan("mixed_50_50", 8, seed=0)
+    for step in ("sglang_adaptive-c1", "sglang_adaptive-c8"):
+        warmup_server(
+            "http://example.invalid",
+            specs,
+            concurrency=4,
+            num_requests=4,
+            rid_prefix=f"warmup-{step}",
+        )
+    assert len(seen) == len(set(seen)) == 8, f"warm-up rids collided: {seen}"

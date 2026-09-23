@@ -195,7 +195,16 @@ K-invariance:       PASS / FAIL / NOT ASSESSED
 recoverable rectangular gap over N captures: mean +X.XX% (min, max)
 ```
 
-Use `--analyze-only` to re-analyse without re-running anything.
+Use `--analyze-only` to re-analyse without re-running anything. It reads the
+report back and rebuilds the steps from it, so it needs no server and no GPU. Run
+it against the **copied** directory: paths in the report are stored relative to
+`results_root`, so the re-analysis rebases onto wherever you put it.
+
+The number it prints is the gap **at the deepest static K**, over the confluence
+of measured cells — not an average across `K`. Shallower `K` captures are listed
+under `excluded` with the reason, and the traced adaptive capture is reported
+separately as a diagnostic. If the report shows `DECISION GAP SUPPRESSED`, the
+K-invariance gate did not pass and no gap should be quoted from that run.
 
 ## 7. What to bring back
 

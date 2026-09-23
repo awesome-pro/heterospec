@@ -92,6 +92,29 @@ total per-batch adaptation  = L2 - L0
 needs ragged execution      = L3 - L2     <- upper bound only, out of scope
 ```
 
+### The action set is the measured grid, not every integer
+
+Every level above chooses `K` from a **fixed candidate set**, and that set is the
+grid of `K` the calibration cells actually measured — `[1, 3, 5, 7]` for Session 1.
+It is not `range(0, max_depth + 1)`.
+
+The restriction is load-bearing. Given cells only at `K ∈ {1,3}`, the cost surface
+will still answer a query for `K = 2` by interpolation, and for `K = 0` by
+*clamping* to the smallest measured `K`. Both are unmeasured numbers. A go/no-go
+decision resting on one is a decision about the cost model's behaviour between its
+measurements, not about the server.
+
+So `oracle_gap_report` sets `candidates = cost.k_values` (positive values only) and
+refuses an explicit candidate that is off the grid. Every capture records
+`clamped_cost_queries`; a non-zero value raises a warning, because it means that
+capture's gap refers to a cell the session never measured.
+
+**`K = 0` (no-spec) is a reference point, not an oracle action.** It has no verify
+round at all, so it is not a point on the cost model's `K` axis: the plan files it
+under its own `purpose`, and `cost_model_from_results` accepts only `calibration`
+cells. It is reported separately as `no_spec_reference` so it can anchor the
+discussion without ever being selected as an optimum.
+
 **The claim must be stated as "a curve beats a scalar", not "per-request beats
 batch-average".** The latter is provably a no-op and is an easy review rejection.
 

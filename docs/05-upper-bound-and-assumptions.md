@@ -187,6 +187,15 @@ Mechanism 5 is the most promising and is not represented in the synthetic study
 at all: the synthetic candidate set was `0..7` with a smooth cost, whereas the
 real ladder is `[1,3,5,7]` at BS≥1 and includes `0` only at BS≥8.
 
+**Session 1 deliberately does not measure this mechanism.** The oracle's action set
+is restricted to the measured grid (`K ∈ {1,3,5,7}`), so "turn speculation off" is
+not available to it and the reported gap therefore **understates** what the real
+policy could achieve. That is the intended direction: the gate we are testing is
+"does a curve beat a scalar *among measured depths*", and a positive answer there
+is a strictly stronger result than one that leans on an unmeasured `K = 0`. If
+Session 1 lands in the marginal band, measuring the `K = 0` cell is the first thing
+to add.
+
 ---
 
 ## 4. Pre-registered decision rule

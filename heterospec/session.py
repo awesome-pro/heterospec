@@ -48,6 +48,9 @@ __all__ = [
     "k_invariance_from_results",
     "load_session_results",
     "oracle_gap_report",
+    "portable_path",
+    "resolve_stored_path",
+    "write_session_report",
 ]
 
 
@@ -328,9 +331,20 @@ class StepResult:
     up the wrong trace after the trace file naming changed."""
     mean_accepted: float | None = None
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, *, root: Path | None = None) -> dict[str, Any]:
+        """Serialize, storing paths relative to `root` when they live under it.
+
+        Relative paths are what make `--analyze-only` usable on a *copied* results
+        directory. Session 1 runs on a rented host and its results are then pulled
+        back to a laptop, so every absolute `/workspace/...` path in the report is
+        dead on arrival. Relative paths rebase onto wherever the directory lands.
+        Paths outside the root are kept absolute and are simply not portable.
+        """
         d = asdict(self)
         d["step"] = asdict(self.step)
+        if root is not None:
+            d["run_dir"] = portable_path(self.run_dir, root)
+            d["trace_path"] = portable_path(self.trace_path, root)
         return d
 
     @classmethod
@@ -464,12 +478,14 @@ def run_session(
                     # does not mean the kernels and allocator for these shapes are
                     # warm, and the first requests would otherwise be slower.
                     if warmup_requests > 0:
+                        # Only the prompts and token budgets of this plan are used;
+                        # `warmup_server` assigns each request its own rid. The plan
+                        # exists so warm-up traffic has the same shape as the run.
                         specs = build_plan(
                             step.workload,
                             max(warmup_requests, step.concurrency),
                             seed=step.seed,
                             max_new_tokens=max_new_tokens,
-                            rid_prefix="wu",
                         )
                         w_ok, w_fail = warmup_server(
                             server.base_url,
@@ -478,6 +494,10 @@ def run_session(
                             num_requests=max(warmup_requests, step.concurrency),
                             max_new_tokens=max_new_tokens,
                             timeout_s=min(server_timeout_s, 900.0),
+                            # Steps in a group share a server, so warm-up rids must
+                            # differ per step or one trace file holds several
+                            # different requests under one name.
+                            rid_prefix=f"warmup-{step.policy_id}-c{step.concurrency}",
                         )
                         log(f"  warm-up: {w_ok} ok, {w_fail} failed (discarded)")
                         if w_ok == 0:
@@ -630,11 +650,62 @@ def cost_model_from_results(
     return MeasuredCostModel.from_points(points), missing
 
 
+def portable_path(path: str | None, root: Path) -> str | None:
+    """Store `path` relative to `root` when it lives under it.
+
+    A path outside the root is returned unchanged: it cannot be made portable, and
+    inventing a relative path with `..` would just be a fragile absolute path in
+    disguise.
+    """
+    if not path:
+        return path
+    try:
+        return str(Path(path).resolve().relative_to(Path(root).resolve()))
+    except ValueError:
+        return path
+
+
+def resolve_stored_path(
+    path: str | None,
+    root: Path,
+    *,
+    recorded_root: str | None = None,
+) -> str | None:
+    """Turn a path from a report into one valid under `root`.
+
+    Three cases, in order:
+
+    1. Relative path -- the portable format. Joined onto `root`.
+    2. Absolute path that still exists -- left alone.
+    3. Absolute path that is gone, but the report recorded the root it was
+       written under -- rebased by its path relative to that old root. This is
+       what rescues a report copied from a rented host before relative paths were
+       in use, where the prefix (`/workspace/session1`) differs but the tail
+       (`run_xyz`) is intact.
+    """
+    if not path:
+        return path
+    stored = Path(path)
+    if not stored.is_absolute():
+        return str(Path(root) / stored)
+    if stored.exists() or not recorded_root:
+        return str(stored)
+    try:
+        tail = stored.resolve().relative_to(Path(recorded_root).resolve())
+    except ValueError:
+        return str(stored)
+    candidate = Path(root) / tail
+    return str(candidate) if candidate.exists() else str(stored)
+
+
 def load_session_results(results_root: Path) -> list[StepResult]:
     """Reconstruct a session's steps from `session1_report.json`.
 
     Enables `--analyze-only`: the report already records every step and its run
     directory, so offline re-analysis needs no GPU and no re-run.
+
+    Paths are rebased onto `results_root`, so the directory can be copied off the
+    rented host and analysed anywhere.
     """
     report_path = Path(results_root) / "session1_report.json"
     if not report_path.is_file():
@@ -643,10 +714,21 @@ def load_session_results(results_root: Path) -> list[StepResult]:
             f"--results-root at a directory that has one"
         )
     payload = read_json(report_path)
-    steps = payload.get("steps") or []
-    if not steps:
+    raw_steps = payload.get("steps") or []
+    if not raw_steps:
         raise FileNotFoundError(f"{report_path} records no steps")
-    return [StepResult.from_dict(d) for d in steps]
+    recorded_root = payload.get("results_root")
+    out: list[StepResult] = []
+    for d in raw_steps:
+        r = StepResult.from_dict(d)
+        r.run_dir = resolve_stored_path(
+            r.run_dir, results_root, recorded_root=recorded_root
+        )
+        r.trace_path = resolve_stored_path(
+            r.trace_path, results_root, recorded_root=recorded_root
+        )
+        out.append(r)
+    return out
 
 
 def oracle_gap_report(
@@ -655,6 +737,7 @@ def oracle_gap_report(
     *,
     invariance: Any | None = None,
     primary_k: int | None = None,
+    candidates: Sequence[int] | None = None,
     n_bins: int = 20,
     train_fraction: float = 0.5,
     seed: int = 0,
@@ -734,6 +817,54 @@ def oracle_gap_report(
     report["primary_k"] = primary_k
     report["available_static_ks"] = static_ks
 
+    # ---- candidate depths: the measured grid only ---------------------------
+    #
+    # An oracle that is allowed to pick any integer depth will happily report a
+    # gap at K=2, 4 or 6 -- depths whose cost was never measured and which the
+    # cost surface can only reach by interpolation -- or at K=0, which the surface
+    # reaches by *clamping* to K=1 (no-spec has no verify round at all, so a
+    # clamped query is not even the right shape, let alone the right number). A
+    # go/no-go decision must not rest on a number the session never measured, so
+    # the action set is exactly the grid the calibration cells define.
+    #
+    # No-spec (K=0) is deliberately NOT an oracle action: it is a reference point.
+    # It is reported as such in `no_spec_reference`, and it never enters the cost
+    # model's K axis (`cost_model_from_results` only accepts `purpose ==
+    # "calibration"`, and the plan files no-spec under its own purpose).
+    grid = sorted({int(k) for k in cost.k_values})
+    if not candidates:
+        candidates = [k for k in grid if k > 0]
+    else:
+        candidates = sorted({int(k) for k in candidates})
+        # An explicit action set is still checked against the grid: silently
+        # accepting an unmeasured K here would reintroduce exactly the bug.
+        off_grid = [k for k in candidates if k not in grid]
+        if off_grid:
+            raise ValueError(
+                f"candidates {off_grid} are not in the measured cost grid {grid}; "
+                f"their cost would be interpolated or clamped, and a go/no-go "
+                f"decision must rest only on measured cells"
+            )
+    if not candidates:
+        report["status"] = "suppressed"
+        report["suppressed_reason"] = (
+            f"the measured cost grid {grid} contains no positive K, so there is no "
+            f"measured action for the oracle to choose"
+        )
+        return report
+    report["candidate_ks"] = list(candidates)
+    report["candidate_source"] = "measured cost grid"
+    report["cost_grid_ks"] = grid
+    report["no_spec_reference"] = {
+        "is_oracle_action": False,
+        "in_cost_grid": 0 in grid,
+        "note": (
+            "no-spec (K=0) is a reference point, not an oracle action: it has no "
+            "verify round, so its cost is not on the K axis and was not measured. "
+            "Interpolating or clamping it would fabricate a number."
+        ),
+    }
+
     def _analyse(entry: dict[str, Any], r: StepResult) -> None:
         run_dir = Path(r.run_dir)
         records = _run_records(run_dir)
@@ -766,9 +897,26 @@ def oracle_gap_report(
                     f"train/test split"
                 )
                 return
+            # Clamp accounting is per capture: a clamped cost query means the
+            # capture asked about a cell the session never measured, which would
+            # put an unmeasured number into a go/no-go decision.
+            before_clamp = getattr(cost, "clamp_count", 0)
             res = analyse_batches(
-                batches, cost, n_bins=n_bins, train_fraction=train_fraction, seed=seed
+                batches,
+                cost,
+                candidates=candidates,
+                n_bins=n_bins,
+                train_fraction=train_fraction,
+                seed=seed,
             )
+            clamped = getattr(cost, "clamp_count", 0) - before_clamp
+            entry["clamped_cost_queries"] = clamped
+            if clamped:
+                report["warnings"].append(
+                    f"{entry['policy_id']} c{entry['concurrency']}: {clamped} cost "
+                    f"queries fell outside the measured grid and were clamped; the "
+                    f"gap for this capture refers to an unmeasured cost"
+                )
             entry["result"] = res.summary()
             entry["recoverable_rectangular_gap"] = res.recoverable_rectangular_gap
         except Exception as e:  # noqa: BLE001 - report, don't abort the analysis
@@ -847,7 +995,10 @@ def write_session_report(
     invariance: dict[str, Any] | None = None,
 ) -> Path:
     payload = {
-        "steps": [r.to_dict() for r in results],
+        # Recorded so `--analyze-only` can rebase paths that were written before
+        # relative serialization, when the report is copied to another machine.
+        "results_root": str(Path(results_root).resolve()),
+        "steps": [r.to_dict(root=Path(results_root)) for r in results],
         "n_ok": sum(r.ok for r in results),
         "n_failed": sum(not r.ok for r in results),
         "total_dispatch_wall_time_s": sum(r.dispatch_wall_time_s for r in results),
@@ -1132,10 +1283,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
-
-
 def k_invariance_from_results(
     results: Sequence[StepResult],
     *,
@@ -1181,3 +1328,12 @@ def k_invariance_from_results(
     if len(by_k) < 2:
         return None
     return k_invariance_check(by_k, tolerance=tolerance)
+
+
+if __name__ == "__main__":
+    # MUST stay last: main() calls k_invariance_from_results, which is defined
+    # above this line. With the guard in the middle of the module, `python -m
+    # heterospec.session` raised NameError before the function was ever bound --
+    # and import-based tests could not see it, because an import never executes
+    # the guard.
+    raise SystemExit(main())

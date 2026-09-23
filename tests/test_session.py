@@ -677,3 +677,172 @@ def test_load_session_results_rejects_a_missing_report(tmp_path):
 
     with pytest.raises(FileNotFoundError, match="no session report"):
         load_session_results(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# The oracle's action set is the measured cost grid
+# ---------------------------------------------------------------------------
+
+
+def _gap_with(grid_results, tmp_path, **kw):
+    model, _ = cost_model_from_results(grid_results, tmp_path)
+    return oracle_gap_report(
+        grid_results, model, invariance=_FakeInvariance(), n_bins=4, seed=0, **kw
+    )
+
+
+def test_oracle_actions_are_the_measured_grid_not_interpolated_depths(tmp_path):
+    """A go/no-go number must not rest on a K whose cost was never measured.
+
+    With calibration cells only at K=1 and K=3, the cost surface can produce a
+    number for K=2 by interpolation. Letting the oracle choose it would put an
+    unmeasured cost into the headline -- and the interpolation is exactly where
+    the cost model is least trustworthy.
+    """
+    grid = [
+        _capture(tmp_path, k=1, conc=8, waves=6, purpose="calibration"),
+        _capture(tmp_path, k=3, conc=8, waves=6, purpose="calibration"),
+    ]
+    gap = _gap_with(grid, tmp_path)
+    assert gap["cost_grid_ks"] == [1, 3]
+    assert gap["candidate_ks"] == [1, 3]
+    assert gap["candidate_source"] == "measured cost grid"
+    for cap in gap["captures"]:
+        chosen = set(cap["result"]["candidates"])
+        assert chosen <= {1, 3}, chosen
+        # In particular: no interpolated depth, and no clamped K=0.
+        assert not (chosen & {0, 2, 4, 5, 6, 7}), chosen
+
+
+def test_no_spec_is_a_reference_and_never_an_oracle_action(tmp_path):
+    """K=0 has no verify round, so the cost surface reaches it only by clamping."""
+    grid = [
+        _capture(tmp_path, k=1, conc=8, waves=6, purpose="calibration"),
+        _capture(tmp_path, k=3, conc=8, waves=6, purpose="calibration"),
+    ]
+    gap = _gap_with(grid, tmp_path)
+    assert 0 not in gap["candidate_ks"]
+    ref = gap["no_spec_reference"]
+    assert ref["is_oracle_action"] is False
+    assert ref["in_cost_grid"] is False
+    assert "not measured" in ref["note"]
+
+
+def test_an_explicitly_off_grid_candidate_is_rejected(tmp_path):
+    """The constraint is enforced, not merely defaulted."""
+    grid = [
+        _capture(tmp_path, k=1, conc=8, waves=6, purpose="calibration"),
+        _capture(tmp_path, k=3, conc=8, waves=6, purpose="calibration"),
+    ]
+    model, _ = cost_model_from_results(grid, tmp_path)
+    with pytest.raises(ValueError, match="not in the measured cost grid"):
+        oracle_gap_report(
+            grid, model, invariance=_FakeInvariance(), candidates=[1, 2, 3]
+        )
+
+
+def test_cost_queries_stay_inside_the_measured_grid(tmp_path):
+    """No capture may report a gap that leans on a clamped cost query."""
+    grid = [
+        _capture(tmp_path, k=1, conc=8, waves=6, purpose="calibration"),
+        _capture(tmp_path, k=3, conc=8, waves=6, purpose="calibration"),
+    ]
+    gap = _gap_with(grid, tmp_path)
+    for cap in gap["captures"]:
+        assert cap.get("clamped_cost_queries") == 0, cap
+    assert not [w for w in gap["warnings"] if "clamped" in w]
+
+
+def test_suppressed_report_carries_no_action_set(tmp_path):
+    """A suppressed report must not leak a candidate list someone could quote."""
+    grid = [_capture(tmp_path, k=3, conc=8, waves=6, purpose="calibration")]
+    model, _ = cost_model_from_results(grid, tmp_path)
+    gap = oracle_gap_report(grid, model, invariance=None, n_bins=4, seed=0)
+    assert gap["status"] == "suppressed"
+    assert "candidate_ks" not in gap
+    assert "no_spec_reference" not in gap
+
+
+# ---------------------------------------------------------------------------
+# Portable paths (so a pulled-back results directory stays analysable)
+# ---------------------------------------------------------------------------
+
+
+def test_portable_path_is_relative_inside_the_root_and_absolute_outside(tmp_path):
+    from heterospec.session import portable_path
+
+    root = tmp_path / "session1"
+    inside = root / "run_a"
+    assert portable_path(str(inside), root) == "run_a"
+    assert portable_path(None, root) is None
+    outside = tmp_path / "elsewhere" / "run_b"
+    assert Path(portable_path(str(outside), root)).is_absolute()
+
+
+def test_resolve_stored_path_joins_relative_paths(tmp_path):
+    from heterospec.session import resolve_stored_path
+
+    root = tmp_path / "pulled-back"
+    assert resolve_stored_path("run_a", root) == str(root / "run_a")
+    assert resolve_stored_path(None, root) is None
+
+
+def test_resolve_stored_path_rebases_a_dead_absolute_path(tmp_path):
+    """An older report records absolute paths under the *rented* root.
+
+    The prefix differs after the copy and the original root is gone -- the rented
+    host no longer exists -- but the tail (`run_xyz`) is intact, and that is enough
+    to find the data again.
+    """
+    from heterospec.session import resolve_stored_path
+
+    old_root = tmp_path / "workspace" / "session1"  # deliberately NOT created
+    new_root = tmp_path / "laptop" / "session1"
+    (new_root / "run_xyz").mkdir(parents=True)
+
+    assert not (old_root / "run_xyz").exists()
+    resolved = resolve_stored_path(
+        str(old_root / "run_xyz"), new_root, recorded_root=str(old_root)
+    )
+    assert resolved == str(new_root / "run_xyz")
+
+
+def test_resolve_stored_path_keeps_a_live_absolute_path(tmp_path):
+    """Rebasing must not second-guess a path that is still valid."""
+    from heterospec.session import resolve_stored_path
+
+    live = tmp_path / "somewhere-else" / "run_xyz"
+    live.mkdir(parents=True)
+    new_root = tmp_path / "new"
+    (new_root / "run_xyz").mkdir(parents=True)
+    assert resolve_stored_path(str(live), new_root) == str(live)
+
+
+def test_report_stores_relative_run_dirs(tmp_path):
+    """The writer half of portability, checked without moving anything."""
+    cap = _capture(tmp_path, k=3, conc=8, waves=6, purpose="calibration")
+    path = write_session_report([cap], results_root=tmp_path)
+    payload = json.loads(path.read_text())
+    stored = payload["steps"][0]["run_dir"]
+    assert not Path(stored).is_absolute(), stored
+    assert (tmp_path / stored).is_dir()
+    assert payload["results_root"] == str(tmp_path.resolve())
+
+
+def test_load_session_results_rebases_every_path(tmp_path):
+    """`--analyze-only` on a copied tree resolves all paths against the new root."""
+    from heterospec.session import load_session_results
+
+    old_root = tmp_path / "old"
+    old_root.mkdir()
+    cap = _capture(old_root, k=3, conc=8, waves=6, purpose="calibration")
+    write_session_report([cap], results_root=old_root)
+
+    new_root = tmp_path / "new"
+    old_root.rename(new_root)
+
+    loaded = load_session_results(new_root)
+    assert len(loaded) == 1
+    assert loaded[0].run_dir is not None
+    assert Path(loaded[0].run_dir).is_dir(), loaded[0].run_dir
+    assert Path(loaded[0].run_dir, "requests.jsonl").is_file()

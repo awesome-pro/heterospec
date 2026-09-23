@@ -24,8 +24,10 @@ case.
 
 from __future__ import annotations
 
+import re
 import threading
 import time
+import zlib
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -50,7 +52,34 @@ from heterospec.workloads import (
     summarise_plan,
 )
 
-__all__ = ["RunConfig", "RunResult", "run_benchmark", "warmup_server"]
+__all__ = [
+    "RunConfig",
+    "RunResult",
+    "rid_prefix_for",
+    "run_benchmark",
+    "warmup_server",
+]
+
+
+def rid_prefix_for(cfg: RunConfig) -> str:
+    """A request-id prefix unique to one run, and stable for that run.
+
+    Request ids must be unique **per server process**, because a policy's steps
+    share one server and one trace file. The run identity therefore has to include
+    everything that distinguishes two runs on that server: the policy, the
+    concurrency (which lives in ``policy_id`` as ``_c<N>``), the static K and the
+    seed. A short digest of the full identity keeps the prefix readable while
+    making accidental collisions between two runs practically impossible -- and
+    when they do coincide, the two runs really are the same run.
+    """
+    parts = [cfg.policy_id]
+    if cfg.static_k is not None:
+        parts.append(f"k{cfg.static_k}")
+    parts.append(f"s{cfg.seed}")
+    parts.append(f"n{cfg.num_requests}")
+    identity = "_".join(parts)
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", identity).strip("-")
+    return f"{slug[:28]}-{zlib.crc32(identity.encode()):08x}_"
 
 
 def warmup_server(
@@ -62,6 +91,7 @@ def warmup_server(
     max_new_tokens: int | None = None,
     temperature: float = 0.0,
     timeout_s: float = 900.0,
+    rid_prefix: str = "warmup",
 ) -> tuple[int, int]:
     """Send untimed requests to bring a freshly launched server to steady state.
 
@@ -76,6 +106,11 @@ def warmup_server(
     Warm-up requests use their own `warmup-*` rids, so they can never be confused
     with measured requests, and their results are discarded. They are sent at the
     step's own concurrency so the same batch shapes and kernels are touched.
+
+    `rid_prefix` must be unique per *step* when several steps share one server:
+    warm-up traffic is traced too, so a fixed prefix would put three different
+    requests named `warmup-00000` into one trace file and make it unreadable when
+    debugging an anomaly.
 
     Returns `(n_ok, n_failed)`. Failures are reported rather than raised: a warm-up
     that fails usually means the server is about to fail loudly anyway, with a
@@ -100,6 +135,7 @@ def warmup_server(
                     base_url,
                     specs[(done + i) % len(specs)],
                     index=done + i,
+                    rid_prefix=rid_prefix,
                     max_new_tokens=max_new_tokens,
                     temperature=temperature,
                     timeout_s=timeout_s,
@@ -120,6 +156,7 @@ def _warmup_one(
     spec: RequestSpec,
     *,
     index: int,
+    rid_prefix: str,
     max_new_tokens: int | None,
     temperature: float,
     timeout_s: float,
@@ -129,7 +166,7 @@ def _warmup_one(
             spec.prompt,
             max_new_tokens=max_new_tokens or spec.max_new_tokens,
             temperature=temperature,
-            rid=f"warmup-{index:05d}",
+            rid=f"{rid_prefix}-{index:05d}",
         )
     return res.ok
 
@@ -331,8 +368,12 @@ def run_benchmark(cfg: RunConfig) -> RunResult:
         cfg.num_requests,
         seed=cfg.seed,
         max_new_tokens=cfg.max_new_tokens,
-        # Prefix rids with the policy so a trace file's rids identify their run.
-        rid_prefix=f"{cfg.policy_id[:6]}",
+        # Prefix rids with the run's full identity so a trace file's rids identify
+        # their run. Truncating the policy id (the previous `policy_id[:6]`) made
+        # every concurrency of the adaptive policy share one prefix -- adaptive_c1,
+        # adaptive_c8 and adaptive_c32 all produced "adapti00001" -- and those
+        # captures share a trace file, so the ids silently collided.
+        rid_prefix=rid_prefix_for(cfg),
     )
     plan_sum = summarise_plan(plan).to_dict()
 

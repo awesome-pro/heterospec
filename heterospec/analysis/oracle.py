@@ -248,9 +248,23 @@ def throughput(
     return total_weight / aggregate_cost_per_token(batches, ks, cost)
 
 
-def _per_request_goodput(survival: tuple[float, ...], k: int, cost: CostModel) -> float:
-    """One request alone at depth k, costed as a batch of one."""
-    return (1.0 + sum(survival[:k])) / cost.cost(k, 1)
+def _per_request_goodput(
+    survival: tuple[float, ...], k: int, cost: CostModel, n: int
+) -> float:
+    """Ranking criterion for one request's own best depth.
+
+    Costed at the batch's measured size `n`, **not** at a batch of one. A batch of
+    one is a shape no session measures -- calibration captures run at real
+    concurrencies -- so `cost.cost(k, 1)` falls outside the grid and the cost model
+    answers it by *clamping* to the smallest measured batch size. That would make
+    L3's per-request choice rest on an unmeasured cost, which is precisely what the
+    oracle is not allowed to do.
+
+    Since `n` is constant across `k` for a given batch, this is an ordering on
+    `tokens / round_cost` and it is used only to pick an argmax; it is not a rate
+    and is never summed or averaged.
+    """
+    return (1.0 + sum(survival[:k])) / cost.cost(k, n)
 
 
 def _candidates(batch: BatchTrace, candidates: Sequence[int] | None) -> list[int]:
@@ -280,7 +294,7 @@ def per_request_best_k(
     """L3: each request independently at its own best K (upper bound only)."""
     ks = _candidates(batch, candidates)
     return tuple(
-        max(ks, key=lambda k: _per_request_goodput(s, k, cost))
+        max(ks, key=lambda k: _per_request_goodput(s, k, cost, batch.n))
         for s in batch.survivals.values()
     )
 
