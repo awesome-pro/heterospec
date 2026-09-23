@@ -102,6 +102,9 @@ class RunResult:
     metadata: RunMetadata
     run_dir: Path | None = None
     wall_time_s: float = 0.0
+    dispatch_wall_time_s: float = 0.0
+    """Wall time of request dispatch only. This is the denominator the cost model
+    must use; the surrounding wall time also covers setup and result writing."""
     plan_summary: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -292,16 +295,19 @@ def run_benchmark(cfg: RunConfig) -> RunResult:
             aggregate={},
             metadata=metadata,
             wall_time_s=time.perf_counter() - started,
+            dispatch_wall_time_s=0.0,
             plan_summary=plan_sum,
         )
 
     dispatcher = _Dispatcher(cfg)
+    dispatch_started = time.perf_counter()
     try:
         if cfg.dispatch == "waves":
             records = _run_waves(plan, cfg, dispatcher)
         else:
             records = _run_continuous(plan, cfg, dispatcher)
     finally:
+        dispatch_wall_time_s = time.perf_counter() - dispatch_started
         dispatcher.close()
 
     records.sort(key=lambda r: r.index)
@@ -312,6 +318,11 @@ def run_benchmark(cfg: RunConfig) -> RunResult:
     aggregate["concurrency"] = cfg.concurrency
     aggregate["static_k"] = cfg.static_k
     aggregate["wall_time_s"] = time.perf_counter() - started
+    # Dispatch-only wall time is what the cost model must use: the surrounding
+    # wall time also covers plan building, server probing and result writing,
+    # which would deflate measured throughput and make the GPU look slower than
+    # it is.
+    aggregate["dispatch_wall_time_s"] = dispatch_wall_time_s
 
     run_dir: Path | None = None
     if cfg.write_results:
@@ -332,5 +343,6 @@ def run_benchmark(cfg: RunConfig) -> RunResult:
         metadata=metadata,
         run_dir=run_dir,
         wall_time_s=time.perf_counter() - started,
+        dispatch_wall_time_s=dispatch_wall_time_s,
         plan_summary=plan_sum,
     )
