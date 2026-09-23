@@ -374,13 +374,13 @@ def test_run_session_produces_analysable_output(tmp_path, port):
     assert not missing, missing
     assert model.k_values == [1, 3]
 
-    gap = oracle_gap_report(results, model, n_bins=4, seed=0)
-    assert gap["captures"]
-    assert "gap_summary" in gap
-
     inv = k_invariance_from_results(results)
     assert inv is not None
     assert isinstance(inv.verdict(), str)
+
+    gap = oracle_gap_report(results, model, invariance=inv, n_bins=4, seed=0)
+    assert gap["captures"], gap
+    assert "gap_summary" in gap
 
     report = write_session_report(
         results,
@@ -573,4 +573,4 @@ def test_the_adaptive_server_does_get_the_trace_env_var(tmp_path, port):
         SessionStep("sglang_adaptive", 8, "mixed_50_50", 48, 0, "adaptive", None),
     )
     assert "SGLANG_HETEROSPEC_TRACE" in env
-    assert env["SGLANG_HETEROSPEC_TRACE"].endswith("trace_sglang_adaptive_c8.jsonl")
+    assert env["SGLANG_HETEROSPEC_TRACE"].endswith("trace_sglang_adaptive.jsonl")

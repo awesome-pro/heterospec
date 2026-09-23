@@ -46,6 +46,7 @@ __all__ = [
     "cost_model_from_results",
     "estimate_session_minutes",
     "k_invariance_from_results",
+    "load_session_results",
     "oracle_gap_report",
 ]
 
@@ -322,12 +323,21 @@ class StepResult:
     n_ok: int = 0
     n_failed: int = 0
     trace_records: int = 0
+    trace_path: str | None = None
+    """Recorded explicitly rather than globbed, so offline analysis cannot pick
+    up the wrong trace after the trace file naming changed."""
     mean_accepted: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["step"] = asdict(self.step)
         return d
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> StepResult:
+        step = SessionStep(**d["step"])
+        known = {f for f in cls.__dataclass_fields__ if f != "step"}
+        return cls(step=step, **{k: v for k, v in d.items() if k in known})
 
 
 def run_session(
@@ -398,125 +408,136 @@ def run_session(
             log(f"\n=== server: {policy_id} -> SKIPPED (no launch config) ===")
             continue
 
+        # ONE server per policy group. Steps in a group share a policy, and
+        # relaunching an 8B model plus its per-tier CUDA graphs costs minutes each
+        # time. Starting a server per STEP silently multiplied the session's
+        # startup cost by the number of concurrencies -- 16 launches instead of 6
+        # -- so the plan's time estimate was roughly half the truth. The slot for
+        # the server must therefore be outside the step loop, not inside it.
         log(f"\n=== server: {policy_id} ({len(group)} runs) ===")
-        first_in_group = True
 
-        for step in group:
-            # Trace ONLY the adaptive capture. Calibration runs feed the cost
-            # model, whose numbers are the oracle's denominator, and the tracer
-            # does synchronous JSON work on the result-processing path once per
-            # decode iteration. The overhead is small, but paying it on the
-            # timed runs to collect data nothing needs would be careless when the
-            # effect under study is a few percent. Calibration's oracle input
-            # comes from response meta_info, not from the trace.
-            trace_path = (
-                results_root / f"trace_{policy_id}_c{step.concurrency}.jsonl"
-                if (collect_trace and step.purpose == "adaptive")
-                else None
-            )
-            server = ServerProcess(
-                launch,
-                sglang_path=sglang_path,
-                port=port,
-                log_path=logs_dir / f"server_{policy_id}_c{step.concurrency}.log",
-                python_exe=python_exe,
-                trace_path=trace_path,
-                env_extra=env_extra,
-                launcher_module=launcher_module,
-            )
-            # Steps under one policy share a server, so "launching" belongs to
-            # the policy, not the step. Saying "launching" per step was
-            # misleading about where the wall time actually goes.
-            log(f"  {step.describe()} -> running")
-            t0 = time.perf_counter()
-            try:
-                server.start()
-                if not server.wait_ready(timeout_s=server_timeout_s):
-                    raise TimeoutError(
-                        f"server not ready within {server_timeout_s}s\n"
-                        + server.tail_log()
-                    )
-                if first_in_group:
-                    log(f"  server ready: {policy_id} @ {server.base_url}")
-                    first_in_group = False
+        # A policy has exactly one purpose, so tracing is a group-level decision.
+        # Only the adaptive capture is traced; see the note in the README.
+        traced = collect_trace and any(s.purpose == "adaptive" for s in group)
+        trace_path = (results_root / f"trace_{policy_id}.jsonl") if traced else None
 
-                # Untimed warm-up at this step's own concurrency: /health-ready
-                # does not mean the kernels and allocator for these shapes are
-                # warm, and the first requests would otherwise be slower.
-                if warmup_requests > 0:
-                    specs = build_plan(
-                        step.workload,
-                        max(warmup_requests, step.concurrency),
-                        seed=step.seed,
-                        max_new_tokens=max_new_tokens,
-                        rid_prefix="wu",
-                    )
-                    w_ok, w_fail = warmup_server(
-                        server.base_url,
-                        specs,
-                        concurrency=step.concurrency,
-                        num_requests=max(warmup_requests, step.concurrency),
-                        max_new_tokens=max_new_tokens,
-                        timeout_s=min(server_timeout_s, 900.0),
-                    )
-                    log(f"  warm-up: {w_ok} ok, {w_fail} failed (discarded)")
-                    if w_ok == 0:
-                        raise RuntimeError(
-                            "every warm-up request failed; the server is not "
-                            "serving, so the timed run would be meaningless.\n"
-                            + server.tail_log()
-                        )
-                cfg = RunConfig(
-                    workload=step.workload,
-                    policy_id=f"{step.policy_id}_c{step.concurrency}",
-                    base_url=server.base_url,
-                    num_requests=step.num_requests,
-                    concurrency=step.concurrency,
-                    dispatch=dispatch,
-                    seed=step.seed,
-                    max_new_tokens=max_new_tokens,
-                    results_root=results_root,
-                    sglang_path=sglang_path,
-                    launch=launch.to_dict(),
-                    static_k=step.static_k,
-                    progress=None,
-                    notes=f"session1 {step.purpose}",
+        server = ServerProcess(
+            launch,
+            sglang_path=sglang_path,
+            port=port,
+            log_path=logs_dir / f"server_{policy_id}.log",
+            python_exe=python_exe,
+            trace_path=trace_path,
+            env_extra=env_extra,
+            launcher_module=launcher_module,
+        )
+
+        try:
+            server.start()
+            if not server.wait_ready(timeout_s=server_timeout_s):
+                raise TimeoutError(
+                    f"server not ready within {server_timeout_s}s\n" + server.tail_log()
                 )
-                r = run_benchmark(cfg)
-                trace_records = 0
-                if trace_path is not None and trace_path.exists():
-                    trace_records = sum(1 for _ in trace_path.open())
-                results.append(
-                    StepResult(
-                        step=step,
-                        ok=True,
-                        run_dir=str(r.run_dir) if r.run_dir else None,
-                        wall_time_s=r.wall_time_s,
-                        dispatch_wall_time_s=r.dispatch_wall_time_s,
-                        n_ok=r.aggregate.get("n_ok", 0),
-                        n_failed=r.aggregate.get("n_failed", 0),
-                        trace_records=trace_records,
-                        mean_accepted=r.aggregate.get("mean_accepted_drafts"),
-                    )
-                )
-                log(
-                    f"  {step.describe()} -> ok "
-                    f"({r.aggregate.get('n_ok', 0)} ok, "
-                    f"{r.aggregate.get('n_failed', 0)} failed, "
-                    f"{r.dispatch_wall_time_s:.1f}s)"
-                )
-            except Exception as e:  # noqa: BLE001 - one bad run must not kill the session
+        except Exception as e:  # noqa: BLE001
+            # The server never came up: fail every step in this group, then let
+            # the rest of the session proceed. Losing the whole paid session to
+            # one bad group is the expensive failure mode.
+            server.stop()
+            for step in group:
                 results.append(
                     StepResult(
                         step=step,
                         ok=False,
-                        error=f"{type(e).__name__}: {e}",
-                        wall_time_s=time.perf_counter() - t0,
+                        error=f"server launch failed: {type(e).__name__}: {e}",
                     )
                 )
-                log(f"  {step.describe()} -> FAILED: {type(e).__name__}: {e}")
-            finally:
-                server.stop()
+            log(f"  SERVER FAILED: {type(e).__name__}: {e}")
+            continue
+
+        log(f"  server ready: {policy_id} @ {server.base_url}")
+        try:
+            for step in group:
+                log(f"  {step.describe()} -> running")
+                t0 = time.perf_counter()
+                try:
+                    # Untimed warm-up at this step's own concurrency: /health-ready
+                    # does not mean the kernels and allocator for these shapes are
+                    # warm, and the first requests would otherwise be slower.
+                    if warmup_requests > 0:
+                        specs = build_plan(
+                            step.workload,
+                            max(warmup_requests, step.concurrency),
+                            seed=step.seed,
+                            max_new_tokens=max_new_tokens,
+                            rid_prefix="wu",
+                        )
+                        w_ok, w_fail = warmup_server(
+                            server.base_url,
+                            specs,
+                            concurrency=step.concurrency,
+                            num_requests=max(warmup_requests, step.concurrency),
+                            max_new_tokens=max_new_tokens,
+                            timeout_s=min(server_timeout_s, 900.0),
+                        )
+                        log(f"  warm-up: {w_ok} ok, {w_fail} failed (discarded)")
+                        if w_ok == 0:
+                            raise RuntimeError(
+                                "every warm-up request failed; the server is not "
+                                "serving, so the timed run would be meaningless.\n"
+                                + server.tail_log()
+                            )
+                    cfg = RunConfig(
+                        workload=step.workload,
+                        policy_id=f"{step.policy_id}_c{step.concurrency}",
+                        base_url=server.base_url,
+                        num_requests=step.num_requests,
+                        concurrency=step.concurrency,
+                        dispatch=dispatch,
+                        seed=step.seed,
+                        max_new_tokens=max_new_tokens,
+                        results_root=results_root,
+                        sglang_path=sglang_path,
+                        launch=launch.to_dict(),
+                        static_k=step.static_k,
+                        progress=None,
+                        notes=f"session1 {step.purpose}",
+                    )
+                    r = run_benchmark(cfg)
+                    trace_records = 0
+                    if trace_path is not None and trace_path.exists():
+                        trace_records = sum(1 for _ in trace_path.open())
+                    results.append(
+                        StepResult(
+                            step=step,
+                            ok=True,
+                            run_dir=str(r.run_dir) if r.run_dir else None,
+                            wall_time_s=r.wall_time_s,
+                            dispatch_wall_time_s=r.dispatch_wall_time_s,
+                            n_ok=r.aggregate.get("n_ok", 0),
+                            n_failed=r.aggregate.get("n_failed", 0),
+                            trace_records=trace_records,
+                            trace_path=str(trace_path) if trace_path else None,
+                            mean_accepted=r.aggregate.get("mean_accepted_drafts"),
+                        )
+                    )
+                    log(
+                        f"  {step.describe()} -> ok "
+                        f"({r.aggregate.get('n_ok', 0)} ok, "
+                        f"{r.aggregate.get('n_failed', 0)} failed, "
+                        f"{r.dispatch_wall_time_s:.1f}s)"
+                    )
+                except Exception as e:  # noqa: BLE001 - one bad step must not kill the group
+                    results.append(
+                        StepResult(
+                            step=step,
+                            ok=False,
+                            error=f"{type(e).__name__}: {e}",
+                            wall_time_s=time.perf_counter() - t0,
+                        )
+                    )
+                    log(f"  {step.describe()} -> FAILED: {type(e).__name__}: {e}")
+        finally:
+            server.stop()
 
     return results
 
@@ -556,7 +577,22 @@ def cost_model_from_results(
         agg = read_json(run_dir / "aggregate.json")
         wall = agg.get("dispatch_wall_time_s") or agg.get("wall_time_s")
         records = _run_records(run_dir)
-        ok = [x for x in records if x.ok]
+        failed = [x for x in records if not x.ok]
+        if failed:
+            # A cell with ANY failed request must not enter the cost surface.
+            # Throughput is total_tokens / wall_time, and a failed request
+            # contributes its elapsed time to the denominator while contributing
+            # no tokens to the numerator -- so the cell would look slower than the
+            # hardware is, and the bias would land arbitrarily across the grid.
+            # Rejecting the cell is the only honest option: partially-correct
+            # timing cannot be repaired after the fact.
+            missing.append(
+                f"K={r.step.static_k},n={r.step.concurrency} "
+                f"(excluded: {len(failed)}/{len(records)} requests failed; their "
+                f"time is in the denominator but their tokens are not)"
+            )
+            continue
+        ok = records
         if not ok or not wall:
             missing.append(
                 f"K={r.step.static_k},n={r.step.concurrency} (no usable data)"
@@ -594,20 +630,55 @@ def cost_model_from_results(
     return MeasuredCostModel.from_points(points), missing
 
 
+def load_session_results(results_root: Path) -> list[StepResult]:
+    """Reconstruct a session's steps from `session1_report.json`.
+
+    Enables `--analyze-only`: the report already records every step and its run
+    directory, so offline re-analysis needs no GPU and no re-run.
+    """
+    report_path = Path(results_root) / "session1_report.json"
+    if not report_path.is_file():
+        raise FileNotFoundError(
+            f"no session report at {report_path}; run the session first, or point "
+            f"--results-root at a directory that has one"
+        )
+    payload = read_json(report_path)
+    steps = payload.get("steps") or []
+    if not steps:
+        raise FileNotFoundError(f"{report_path} records no steps")
+    return [StepResult.from_dict(d) for d in steps]
+
+
 def oracle_gap_report(
     results: Sequence[StepResult],
     cost: MeasuredCostModel,
     *,
+    invariance: Any | None = None,
+    primary_k: int | None = None,
     n_bins: int = 20,
     train_fraction: float = 0.5,
     seed: int = 0,
 ) -> dict[str, Any]:
-    """Compute the recoverable rectangular gap from every usable capture.
+    """Compute the recoverable rectangular gap, gated on K-invariance.
 
-    Static captures use wave reconstruction (controlled batches); adaptive
-    captures use the iteration trace (true batches). Both are reported, because
-    the static grid is the controlled measurement and the adaptive run is the
-    realistic one.
+    Two structural rules, both of which were wrong before and both of which would
+    have produced a misleading headline:
+
+    **1. The K-invariance check is a gate, not a diagnostic.** Every level here
+    evaluates `E[acc | K]` at depths a request may never have run, which is only
+    valid if per-position acceptance does not depend on `K`. If the check failed,
+    or could not be assessed, no decision gap is computed or reported: the report
+    comes back with ``status = "suppressed"`` and the reason. Returning a number
+    in that state invites quoting it.
+
+    **2. The headline uses only the deepest static capture per concurrency.**
+    Averaging gaps across `K = 1, 3, 5, 7` captures biases the result downward,
+    because a capture taken at `K` can only ever choose from `0..K` -- a `K=1`
+    capture is scored on a two-point candidate set and cannot express the gap the
+    project is looking for. The deepest static capture at each concurrency has the
+    full ladder available and is the controlled primary measurement. Adaptive
+    captures are reported separately as a diagnostic, never averaged into the
+    headline, because they are traced and their throughput is not comparable.
     """
     from heterospec.analysis.oracle import analyse_batches
     from heterospec.analysis.traces import (
@@ -617,23 +688,55 @@ def oracle_gap_report(
     )
 
     report: dict[str, Any] = {
+        "status": "ok",
         "cost_model": cost.coverage(),
         "captures": [],
+        "diagnostic": [],
+        "excluded": [],
         "warnings": [],
     }
 
-    for r in results:
-        if not r.ok or not r.run_dir:
-            continue
+    # ---- gate ---------------------------------------------------------------
+    if invariance is None:
+        report["status"] = "suppressed"
+        report["suppressed_reason"] = (
+            "K-invariance was not assessed, so the oracle's central assumption is "
+            "untested and any gap would be uninterpretable."
+        )
+        return report
+    if not getattr(invariance, "passed", False):
+        report["status"] = "suppressed"
+        report["suppressed_reason"] = "K-invariance did not pass: " + str(
+            invariance.verdict()
+        )
+        report["k_invariance"] = (
+            invariance.summary() if hasattr(invariance, "summary") else None
+        )
+        return report
+    report["k_invariance"] = (
+        invariance.summary() if hasattr(invariance, "summary") else None
+    )
+
+    # ---- which static K is the primary? ------------------------------------
+    static_ks = sorted(
+        {
+            int(r.step.static_k)
+            for r in results
+            if r.ok and r.step.purpose == "calibration" and r.step.static_k is not None
+        }
+    )
+    if primary_k is None:
+        if not static_ks:
+            report["status"] = "suppressed"
+            report["suppressed_reason"] = "no usable static calibration captures"
+            return report
+        primary_k = static_ks[-1]
+    report["primary_k"] = primary_k
+    report["available_static_ks"] = static_ks
+
+    def _analyse(entry: dict[str, Any], r: StepResult) -> None:
         run_dir = Path(r.run_dir)
         records = _run_records(run_dir)
-        entry: dict[str, Any] = {
-            "policy_id": r.step.policy_id,
-            "purpose": r.step.purpose,
-            "concurrency": r.step.concurrency,
-            "static_k": r.step.static_k,
-            "run_dir": str(run_dir),
-        }
         try:
             if r.step.purpose == "calibration":
                 batches, skips = batches_from_waves(
@@ -641,22 +744,19 @@ def oracle_gap_report(
                     concurrency=r.step.concurrency,
                     k_static=int(r.step.static_k),
                 )
-            elif r.step.purpose == "adaptive":
-                trace_files = sorted(
-                    run_dir.parent.glob(
-                        f"trace_{r.step.policy_id}_c{r.step.concurrency}.jsonl"
+            else:
+                trace = Path(r.trace_path) if r.trace_path else None
+                if trace is None or not trace.exists():
+                    entry["error"] = (
+                        "no iteration trace recorded for this capture "
+                        "(trace_path absent or missing on disk)"
                     )
-                )
-                if not trace_files:
-                    entry["error"] = "no iteration trace found for adaptive capture"
-                    report["captures"].append(entry)
-                    continue
+                    return
                 from heterospec.records import load_iteration_records
 
-                iterations = load_iteration_records(trace_files[0])
-                batches, skips = batches_from_iterations(records, iterations)
-            else:
-                continue
+                batches, skips = batches_from_iterations(
+                    records, load_iteration_records(trace)
+                )
 
             entry["n_batches"] = len(batches)
             entry["skips"] = describe_skips(skips)
@@ -665,9 +765,7 @@ def oracle_gap_report(
                     f"only {len(batches)} usable batches; need at least 4 for a "
                     f"train/test split"
                 )
-                report["captures"].append(entry)
-                continue
-
+                return
             res = analyse_batches(
                 batches, cost, n_bins=n_bins, train_fraction=train_fraction, seed=seed
             )
@@ -675,6 +773,38 @@ def oracle_gap_report(
             entry["recoverable_rectangular_gap"] = res.recoverable_rectangular_gap
         except Exception as e:  # noqa: BLE001 - report, don't abort the analysis
             entry["error"] = f"{type(e).__name__}: {e}"
+
+    for r in results:
+        if not r.ok or not r.run_dir:
+            continue
+        entry: dict[str, Any] = {
+            "policy_id": r.step.policy_id,
+            "purpose": r.step.purpose,
+            "concurrency": r.step.concurrency,
+            "static_k": r.step.static_k,
+            "run_dir": str(r.run_dir),
+        }
+        if r.step.purpose not in ("calibration", "adaptive"):
+            continue
+
+        if r.step.purpose == "adaptive":
+            # Diagnostic only. Never averaged into the headline: the capture is
+            # traced, so its throughput is not comparable with the untraced grid.
+            _analyse(entry, r)
+            report["diagnostic"].append(entry)
+            continue
+
+        if int(r.step.static_k or -1) != primary_k:
+            entry["excluded_reason"] = (
+                f"capture taken at K={r.step.static_k}; only the deepest static "
+                f"capture (K={primary_k}) has the full candidate ladder, so a "
+                f"shallower one cannot express the gap and would bias the mean "
+                f"downward"
+            )
+            report["excluded"].append(entry)
+            continue
+
+        _analyse(entry, r)
         report["captures"].append(entry)
 
     gaps = [
@@ -684,14 +814,25 @@ def oracle_gap_report(
     ]
     if gaps:
         report["gap_summary"] = {
+            "primary_k": primary_k,
             "n_captures": len(gaps),
+            "concurrencies": [
+                c["concurrency"]
+                for c in report["captures"]
+                if "recoverable_rectangular_gap" in c
+            ],
             "min": min(gaps),
             "max": max(gaps),
             "mean": sum(gaps) / len(gaps),
+            "note": (
+                "primary controlled measurement: static captures at the deepest K, "
+                "one per concurrency. Not averaged across K, and excludes the "
+                "traced adaptive diagnostic."
+            ),
         }
     else:
         report["warnings"].append(
-            "no capture produced a gap; check the per-capture errors"
+            f"no primary (K={primary_k}) capture produced a gap; see per-capture errors"
         )
     return report
 
@@ -894,7 +1035,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
     results: list[StepResult] = []
-    if not args.analyze_only:
+    if args.analyze_only:
+        # Reconstruct the run from disk. Without this, --analyze-only passed an
+        # empty list into the analysis, which raised and printed "analysis
+        # failed" -- so the runbook's offline re-analysis instructions did not
+        # work, which is exactly when you least want a broken command.
+        try:
+            results = load_session_results(args.results_root)
+        except FileNotFoundError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+        print(f"re-analysing {len(results)} steps from {args.results_root}")
+    else:
         results = run_session(
             steps,
             launches=launches,
@@ -912,16 +1064,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     missing: list[str] = []
     gap = None
     invariance = None
-    try:
-        cost, missing = cost_model_from_results(results, args.results_root)
-        gap = oracle_gap_report(results, cost)
-    except Exception as e:  # noqa: BLE001
-        print(f"analysis failed: {type(e).__name__}: {e}")
 
+    # ORDER MATTERS. The invariance check runs first because it gates the gap:
+    # every oracle level evaluates E[acc | K] at depths a request may never have
+    # run, so a gap computed under a failed invariance assumption is a number
+    # nobody should quote.
     try:
         invariance = k_invariance_from_results(results)
     except Exception as e:  # noqa: BLE001
         print(f"K-invariance check failed to run: {type(e).__name__}: {e}")
+
+    try:
+        cost, missing = cost_model_from_results(results, args.results_root)
+    except Exception as e:  # noqa: BLE001
+        print(f"cost model failed: {type(e).__name__}: {e}")
+
+    if cost is not None:
+        try:
+            gap = oracle_gap_report(results, cost, invariance=invariance)
+        except Exception as e:  # noqa: BLE001
+            print(f"oracle gap failed: {type(e).__name__}: {e}")
 
     report = write_session_report(
         results,
@@ -941,13 +1103,32 @@ def main(argv: Sequence[str] | None = None) -> int:
             "K-invariance: NOT ASSESSED (fewer than two static depths usable). "
             "The oracle's central assumption is therefore untested."
         )
-    if gap and "gap_summary" in gap:
+    if gap and gap.get("status") == "suppressed":
+        print(f"DECISION GAP SUPPRESSED: {gap.get('suppressed_reason')}")
+    elif gap and "gap_summary" in gap:
         g = gap["gap_summary"]
         print(
-            f"recoverable rectangular gap over {g['n_captures']} captures: "
+            f"PRIMARY gap (static K={g['primary_k']}, "
+            f"concurrencies {g['concurrencies']}): "
             f"mean {g['mean'] * 100:+.2f}% "
             f"(min {g['min'] * 100:+.2f}%, max {g['max'] * 100:+.2f}%)"
         )
+        if gap.get("excluded"):
+            print(
+                f"  ({len(gap['excluded'])} shallower-K captures excluded from the "
+                f"primary; see report)"
+            )
+        if gap.get("diagnostic"):
+            got = [
+                d["recoverable_rectangular_gap"]
+                for d in gap["diagnostic"]
+                if "recoverable_rectangular_gap" in d
+            ]
+            if got:
+                print(
+                    f"  diagnostic (traced adaptive, NOT the headline): "
+                    f"{[f'{v * 100:+.2f}%' for v in got]}"
+                )
     return 0
 
 

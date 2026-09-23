@@ -127,6 +127,20 @@ def test_step_describe_is_readable():
 # ---------------------------------------------------------------------------
 
 
+class _FakeInvariance:
+    """Stands in for InvarianceReport so the gate can be driven directly."""
+
+    def __init__(self, passed: bool = True, verdict: str = "PASS: fake"):
+        self.passed = passed
+        self._verdict = verdict
+
+    def verdict(self) -> str:
+        return self._verdict
+
+    def summary(self) -> dict:
+        return {"passed": self.passed, "verdict": self._verdict}
+
+
 def _fake_ok_result(
     run_dir: Path, k: int, conc: int, purpose="calibration"
 ) -> StepResult:
@@ -235,7 +249,9 @@ def test_end_to_end_session_pipeline_on_the_mock(tmp_path):
     assert model.k_values == [1, 3]
     assert model.batch_sizes == [4, 8]
 
-    gap = oracle_gap_report(results, model, n_bins=4, seed=0)
+    gap = oracle_gap_report(
+        results, model, invariance=_FakeInvariance(), n_bins=4, seed=0
+    )
     assert gap["captures"], "no capture produced a result"
     # Every capture should have produced a gap or an explicit error.
     for c in gap["captures"]:
@@ -257,15 +273,36 @@ def test_end_to_end_session_pipeline_on_the_mock(tmp_path):
 
 
 def test_adaptive_capture_without_a_trace_is_reported_not_crashed(tmp_path):
-    """The adaptive path needs the trace; its absence must be diagnosed."""
-    results = [_capture(tmp_path, k=3, conc=8, waves=6, purpose="adaptive")]
-    model, _ = cost_model_from_results(
-        [_capture(tmp_path, k=3, conc=8, waves=6, purpose="calibration")], tmp_path
+    """The adaptive path needs the trace; its absence must be diagnosed.
+
+    A calibration capture is included so the primary K is derivable -- without
+    one the gate suppresses the whole report before looking at captures, which is
+    itself the correct behaviour and is asserted separately.
+    """
+    cal = _capture(tmp_path, k=3, conc=8, waves=6, purpose="calibration")
+    adaptive = _capture(tmp_path, k=3, conc=8, waves=6, purpose="adaptive")
+    model, _ = cost_model_from_results([cal], tmp_path)
+    gap = oracle_gap_report(
+        [cal, adaptive], model, invariance=_FakeInvariance(), n_bins=4, seed=0
     )
-    gap = oracle_gap_report(results, model, n_bins=4, seed=0)
-    entry = gap["captures"][0]
+    assert gap["status"] == "ok"
+    entry = gap["diagnostic"][0]
     assert "error" in entry
     assert "trace" in entry["error"]
+
+
+def test_no_static_capture_suppresses_the_whole_report(tmp_path):
+    """Without a static capture there is no primary K and no possible invariance
+    check, so nothing may be reported -- including the adaptive diagnostic."""
+    adaptive = _capture(tmp_path, k=3, conc=8, waves=6, purpose="adaptive")
+    cal = _capture(tmp_path, k=3, conc=8, waves=6, purpose="calibration")
+    model, _ = cost_model_from_results([cal], tmp_path)
+    gap = oracle_gap_report(
+        [adaptive], model, invariance=_FakeInvariance(), n_bins=4, seed=0
+    )
+    assert gap["status"] == "suppressed"
+    assert "no usable static calibration" in gap["suppressed_reason"]
+    assert gap.get("captures", []) == []
 
 
 def test_gap_report_survives_a_failed_capture(tmp_path):
@@ -277,15 +314,33 @@ def test_gap_report_survives_a_failed_capture(tmp_path):
         ok=False,
         error="server died",
     )
-    gap = oracle_gap_report([bad], model, n_bins=4, seed=0)
+    # A failed primary capture leaves no usable static K at all, so the report is
+    # suppressed rather than silently reporting a gap over nothing.
+    gap = oracle_gap_report(
+        [bad], model, invariance=_FakeInvariance(), n_bins=4, seed=0
+    )
+    assert gap["status"] == "suppressed"
     assert gap["captures"] == []
+
+
+def test_primary_capture_with_too_few_batches_warns(tmp_path):
+    """A primary capture that exists but is unusable must warn, not vanish."""
+    results = [_capture(tmp_path, k=3, conc=8, waves=2, purpose="calibration")]
+    model, _ = cost_model_from_results(results, tmp_path)
+    gap = oracle_gap_report(
+        results, model, invariance=_FakeInvariance(), n_bins=4, seed=0
+    )
+    assert gap["status"] == "ok"
+    assert gap["captures"][0]["error"]
     assert gap["warnings"]
 
 
 def test_too_few_batches_is_reported_not_analysed(tmp_path):
     results = [_capture(tmp_path, k=3, conc=8, waves=2, purpose="calibration")]
     model, _ = cost_model_from_results(results, tmp_path)
-    gap = oracle_gap_report(results, model, n_bins=4, seed=0)
+    gap = oracle_gap_report(
+        results, model, invariance=_FakeInvariance(), n_bins=4, seed=0
+    )
     entry = gap["captures"][0]
     assert "error" in entry and "train/test split" in entry["error"]
 
@@ -370,8 +425,8 @@ def test_session_report_includes_k_invariance(tmp_path):
         for s in steps
     ]
     model, missing = cost_model_from_results(results, tmp_path)
-    gap = oracle_gap_report(results, model, n_bins=4, seed=0)
     inv = k_invariance_from_results(results)
+    gap = oracle_gap_report(results, model, invariance=inv, n_bins=4, seed=0)
     path = write_session_report(
         results,
         results_root=tmp_path,
@@ -432,3 +487,193 @@ def test_estimate_is_json_serialisable():
 
     steps = build_session_plan(LAUNCHES, ks=[1], concurrencies=[8], waves_per_step=4)
     assert json.loads(json.dumps(estimate_session_minutes(steps, LAUNCHES)))
+
+
+# ---------------------------------------------------------------------------
+# The K-invariance gate must be structural
+# ---------------------------------------------------------------------------
+
+
+def test_gap_suppressed_when_invariance_failed(tmp_path):
+    """A failed invariance check must not yield a decision number.
+
+    Every oracle level evaluates E[acc | K] at depths a request may never have
+    run. If per-position acceptance depends on K, that quantity does not exist,
+    and returning a number invites someone to quote it.
+    """
+    results = [_capture(tmp_path, k=3, conc=8, waves=6, purpose="calibration")]
+    model, _ = cost_model_from_results(results, tmp_path)
+    gap = oracle_gap_report(
+        results,
+        model,
+        invariance=_FakeInvariance(False, "FAIL: fake failure"),
+        n_bins=4,
+        seed=0,
+    )
+    assert gap["status"] == "suppressed"
+    assert "did not pass" in gap["suppressed_reason"]
+    assert "gap_summary" not in gap
+    assert gap["captures"] == []
+
+
+def test_gap_suppressed_when_invariance_not_assessed(tmp_path):
+    """Absent evidence is not a pass."""
+    results = [_capture(tmp_path, k=3, conc=8, waves=6, purpose="calibration")]
+    model, _ = cost_model_from_results(results, tmp_path)
+    gap = oracle_gap_report(results, model, invariance=None, n_bins=4, seed=0)
+    assert gap["status"] == "suppressed"
+    assert "not assessed" in gap["suppressed_reason"]
+    assert "gap_summary" not in gap
+
+
+def test_gap_computed_only_when_invariance_passes(tmp_path):
+    results = [_capture(tmp_path, k=3, conc=8, waves=6, purpose="calibration")]
+    model, _ = cost_model_from_results(results, tmp_path)
+    gap = oracle_gap_report(
+        results, model, invariance=_FakeInvariance(True), n_bins=4, seed=0
+    )
+    assert gap["status"] == "ok"
+    assert "gap_summary" in gap
+
+
+# ---------------------------------------------------------------------------
+# Primary aggregation: deepest static K only, adaptive kept separate
+# ---------------------------------------------------------------------------
+
+
+def _multi_k_captures(tmp_path):
+    cal1 = _capture(tmp_path, k=1, conc=8, waves=6, purpose="calibration")
+    cal3 = _capture(tmp_path, k=3, conc=8, waves=6, purpose="calibration")
+    adaptive = _capture(tmp_path, k=3, conc=8, waves=6, purpose="adaptive")
+    return cal1, cal3, adaptive
+
+
+def test_primary_uses_only_the_deepest_static_k(tmp_path):
+    """A K=1 capture cannot express the gap: its candidate set is {0,1}.
+
+    Including shallow captures in the headline biases it downward, which is
+    exactly the direction that would kill a real effect.
+    """
+    cal1, cal3, adaptive = _multi_k_captures(tmp_path)
+    model, _ = cost_model_from_results([cal1, cal3], tmp_path)
+    gap = oracle_gap_report(
+        [cal1, cal3, adaptive], model, invariance=_FakeInvariance(), n_bins=4, seed=0
+    )
+    assert gap["primary_k"] == 3
+    assert gap["available_static_ks"] == [1, 3]
+    assert [c["static_k"] for c in gap["captures"]] == [3]
+
+
+def test_shallower_k_captures_are_excluded_with_a_reason(tmp_path):
+    cal1, cal3, adaptive = _multi_k_captures(tmp_path)
+    model, _ = cost_model_from_results([cal1, cal3], tmp_path)
+    gap = oracle_gap_report(
+        [cal1, cal3, adaptive], model, invariance=_FakeInvariance(), n_bins=4, seed=0
+    )
+    assert len(gap["excluded"]) == 1
+    entry = gap["excluded"][0]
+    assert entry["static_k"] == 1
+    assert "cannot express the gap" in entry["excluded_reason"]
+
+
+def test_adaptive_results_are_diagnostic_not_in_the_headline(tmp_path):
+    """The adaptive capture is traced, so its throughput is not comparable."""
+    cal1, cal3, adaptive = _multi_k_captures(tmp_path)
+    model, _ = cost_model_from_results([cal1, cal3], tmp_path)
+    gap = oracle_gap_report(
+        [cal1, cal3, adaptive], model, invariance=_FakeInvariance(), n_bins=4, seed=0
+    )
+    assert [c["purpose"] for c in gap["captures"]] == ["calibration"]
+    assert [c["purpose"] for c in gap["diagnostic"]] == ["adaptive"]
+    assert gap["gap_summary"]["n_captures"] == len(gap["captures"])
+
+
+def test_primary_k_can_be_chosen_explicitly(tmp_path):
+    cal1, cal3, adaptive = _multi_k_captures(tmp_path)
+    model, _ = cost_model_from_results([cal1, cal3], tmp_path)
+    gap = oracle_gap_report(
+        [cal1, cal3],
+        model,
+        invariance=_FakeInvariance(),
+        primary_k=1,
+        n_bins=4,
+        seed=0,
+    )
+    assert gap["primary_k"] == 1
+    assert [c["static_k"] for c in gap["captures"]] == [1]
+
+
+def test_gap_summary_documents_that_it_is_not_averaged_across_k(tmp_path):
+    cal1, cal3, adaptive = _multi_k_captures(tmp_path)
+    model, _ = cost_model_from_results([cal1, cal3], tmp_path)
+    gap = oracle_gap_report(
+        [cal1, cal3, adaptive], model, invariance=_FakeInvariance(), n_bins=4, seed=0
+    )
+    s = gap["gap_summary"]
+    assert s["primary_k"] == 3
+    assert "Not averaged across K" in s["note"]
+    assert s["concurrencies"] == [8]
+
+
+# ---------------------------------------------------------------------------
+# Cost cells with request failures must be rejected
+# ---------------------------------------------------------------------------
+
+
+def test_cost_model_rejects_a_cell_with_any_failed_request(tmp_path):
+    """Failed time is in the denominator but failed tokens are not in the
+    numerator, so the cell would look slower than the hardware is."""
+    good = _capture(tmp_path, k=1, conc=8, waves=4, purpose="calibration")
+    contaminated = _capture(tmp_path, k=3, conc=8, waves=4, purpose="calibration")
+
+    # Append one failed request to the good cell's records, keeping the wall time.
+    from heterospec.records import RequestRecord, write_jsonl
+
+    path = Path(contaminated.run_dir) / "requests.jsonl"
+    existing = [
+        RequestRecord.from_dict(d)
+        for d in (
+            line and __import__("json").loads(line)
+            for line in path.read_text().splitlines()
+            if line.strip()
+        )
+    ]
+    write_jsonl(
+        path,
+        existing + [RequestRecord(rid="boom", index=999, ok=False, error="timeout")],
+    )
+
+    model, missing = cost_model_from_results([good, contaminated], tmp_path)
+    assert model.k_values == [1], "contaminated cell must not enter the surface"
+    assert any("excluded" in m and "K=3" in m for m in missing), missing
+
+
+def test_cost_model_accepts_a_clean_cell(tmp_path):
+    good = _capture(tmp_path, k=3, conc=8, waves=4, purpose="calibration")
+    model, missing = cost_model_from_results([good], tmp_path)
+    assert not missing
+    assert model.k_values == [3]
+
+
+# ---------------------------------------------------------------------------
+# Offline re-analysis
+# ---------------------------------------------------------------------------
+
+
+def test_step_result_round_trips_through_dict():
+    r = StepResult(
+        step=SessionStep("static_k1", 8, "mixed_50_50", 48, 0, "calibration", 1),
+        ok=True,
+        run_dir="/tmp/x",
+        n_ok=48,
+        trace_path="/tmp/t.jsonl",
+    )
+    back = StepResult.from_dict(r.to_dict())
+    assert back == r
+
+
+def test_load_session_results_rejects_a_missing_report(tmp_path):
+    from heterospec.session import load_session_results
+
+    with pytest.raises(FileNotFoundError, match="no session report"):
+        load_session_results(tmp_path)
