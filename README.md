@@ -5,6 +5,10 @@ Request-aware adaptive speculative decoding for heterogeneous SGLang workloads.
 > **Status: Session 1 ready, awaiting GPU.** The harness, analysis and oracle are
 > built and tested on the Mac (420 tests, 0 GPU hours). No performance number
 > exists yet. Nothing in this README is a result.
+>
+> **Running the experiment? Follow [`RUN_SESSION_1.md`](RUN_SESSION_1.md).** It is
+> the single linear guide from deploying the pod to reading the decision. The
+> documents in `docs/` are reference material and are not needed to run it.
 
 ## 1. Problem
 

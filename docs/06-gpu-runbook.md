@@ -16,17 +16,7 @@ placeholders until the first real session replaces the coefficients.
 ## 1. Which GPU
 
 **Recommendation: a 48 GB card — L40S or A6000.** On a tighter budget, A100 40 GB
-works with the 40 GB config variant. Avoid 24 GB.
-
-Why 24 GB fails, concretely:
-
-```text
-Llama-3.1-8B in fp16                    ~16.1 GB
-EAGLE3 draft model                       ~1.5 GB
-static weights total                    ~17.6 GB
-
-mem_fraction_static 0.7 on a 24 GB card = 16.8 GB  <  17.6 GB
-```
+works with the 40 GB config variant.
 
 The server OOMs **before allocating any KV cache**. Lowering
 `mem_fraction_static` does not help — the weights are the weights. The canonical
