@@ -3,7 +3,7 @@
 Request-aware adaptive speculative decoding for heterogeneous SGLang workloads.
 
 > **Status: Session 1 ready, awaiting GPU.** The harness, analysis and oracle are
-> built and tested on the Mac (387 tests, 0 GPU hours). No performance number
+> built and tested on the Mac (420 tests, 0 GPU hours). No performance number
 > exists yet. Nothing in this README is a result.
 
 ## 1. Problem
@@ -244,7 +244,7 @@ Everything below runs on the Mac with no GPU:
 ```bash
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -e ".[dev]"
-.venv/bin/python -m pytest                      # 387 tests
+.venv/bin/python -m pytest                      # 420 tests
 
 # full pipeline against a mock SGLang, no GPU
 .venv/bin/python -m heterospec.benchmark \

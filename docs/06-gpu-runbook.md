@@ -2,7 +2,7 @@
 
 The only work that must happen on rented hardware, written so nothing on the GPU
 side needs authoring or debugging. Everything it depends on is built and tested on
-the Mac (387 tests, no GPU).
+the Mac (420 tests, no GPU).
 
 Target: **roughly 16 benchmark runs across 6 server launches**, estimated at
 ~72 min nominal / ~116 min pessimistic. Budget against the pessimistic figure:
@@ -69,6 +69,23 @@ huggingface-cli download lmsys/sglang-EAGLE3-LLaMA3.1-Instruct-8B
 set `HF_TOKEN` first, or the session dies at the first server launch.
 
 ## 4. Get the code onto the host
+
+Sections 4–5 are scripted, because they are the part that costs billable time if
+done by hand and wrong. The script sequences exactly the steps below, verifies each
+one, and **never starts the paid run** — it ends by printing the command for
+section 6:
+
+```bash
+# verify the host without changing anything (safe to run first)
+bash scripts/gpu_bootstrap.sh --check
+
+# clone both repos at the pinned revisions, install, pre-download, dry-run
+bash scripts/gpu_bootstrap.sh                 # add --a100-40gb on a 40 GB card
+```
+
+It fails fast on the things that otherwise surface mid-session: Python outside
+`>=3.11,<3.13`, a missing `pip`, too little VRAM or disk, a missing `HF_TOKEN`, the
+wrong SGLang commit, or a dirty fork checkout. The manual equivalent follows.
 
 ```bash
 export HF_HOME=/workspace/hf      # weights live on the volume, not the container
