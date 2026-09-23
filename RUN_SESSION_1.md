@@ -58,8 +58,10 @@ the default cache location is fine.
 > or if RunPod's bandwidth from your chosen datacenter turns out to be slow. If
 > Session 1 says "pursue" and you find yourself running five more sessions, revisit
 > this — at 50 GB it is $3.50/month.
-**✅ Check:** the pod shows `Running`, the volume is mounted at `/workspace`, and
-`nvidia-smi` reports an RTX A6000 with ~48 GB.
+**✅ Check:** the pod shows `Running` and "Total disk" reads **100 GB**. There is
+deliberately **no volume**, so the "Nothing mounted at the template's path"
+warning will still be visible — that is expected, ignore it. Once the pod is up,
+`nvidia-smi` should report an RTX A6000 with ~48 GB.
 
 ---
 
