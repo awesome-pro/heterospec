@@ -2,9 +2,13 @@
 
 Request-aware adaptive speculative decoding for heterogeneous SGLang workloads.
 
-> **Status: Session 1 ready, awaiting GPU.** The harness, analysis and oracle are
-> built and tested on the Mac (420 tests, 0 GPU hours). No performance number
-> exists yet. Nothing in this README is a result.
+> **Status: Session 1 is complete and its results are in
+> [`docs/07-session1-results.md`](docs/07-session1-results.md).** The
+> pre-registered K-invariance gate **failed**, so the oracle's gap is not
+> reportable and the pre-registered decision is a no-go for it. Three findings
+> stand independently: per-position acceptance is *not* K-invariant; on the
+> configuration measured, speculative decoding loses to no-spec; and the workload's
+> class heterogeneity is large. Read `docs/07` before citing anything.
 >
 > **Running the experiment? Follow [`RUN_SESSION_1.md`](RUN_SESSION_1.md).** It is
 > the single linear guide from deploying the pod to reading the decision. The

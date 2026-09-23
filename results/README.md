@@ -51,6 +51,24 @@ An earlier version of this rule treated "HEAD != pinned base" as non-citable,
 which would have marked every Session 1 result unusable — by the project's own
 tooling. Only uncommitted changes are disqualifying.
 
+## Session 1 (2026-09-23) — where the payload lives
+
+The first real-GPU session ran 16 captures (K in {1,3,5,7} x concurrency in
+{1,8,32}, plus no-spec at c32) on a RunPod RTX A6000. The **analysis** is in
+`docs/07-session1-results.md`; the payload is deliberately not committed here.
+
+```text
+tree        results/session1/  (21 MB, 56 files)
+manifest    750ec6ae90c43427da2c1590b8ca1324  (md5 of the sorted file hashes)
+contents    16 run dirs, session1_report.json, logs/server_*.log,
+            trace_sglang_adaptive.jsonl (15 MB, 31,403 records)
+```
+
+It is reproduced from the provenance block in `docs/07`: the pinned base, the
+experiment patch SHA, the launch config and the workload definition are all that
+is needed. If a claim in `docs/07` ever needs the raw rows, treat this tree as the
+source of truth and verify it against the manifest hash before use.
+
 ## Hard rules
 
 1. **No run with `working_tree_dirty: true` is citable.** The exact code cannot be
