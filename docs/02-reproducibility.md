@@ -99,6 +99,27 @@ uv pip install --python .venv/bin/python -e ".[dev]"
 .venv/bin/python -m pytest
 ```
 
+### uv locally, pip on the GPU host
+
+The split is deliberate:
+
+* **Local analysis env: `uv`.** Nothing about the analysis needs SGLang, so the
+  fast resolver is free to use.
+* **SGLang on the GPU host: `pip`.** SGLang's own `docker/Dockerfile` installs
+  everything with `python3 -m pip install`, and that is the path its maintainers
+  test. `uv` *can* resolve the tree — it does all 204 packages in about six
+  seconds and picks the same critical pins (`torch==2.13.0`,
+  `flashinfer-python==0.6.18`, `cuda-tile==1.6.0rc5`) — but the install is a small
+  part of a ~$1 session, so trading a tested installer for an untested one buys
+  cents and risks the one run that has to be defensible.
+
+What `uv` is genuinely useful for here is **freezing** the environment, which pip
+does not do on its own:
+[`configs/env/sglang-py312-linux.lock`](../configs/env/sglang-py312-linux.lock)
+records the full resolution for the host platform, with instructions for diffing
+it against `pip freeze` on the host. SGLang ships no lockfile, so without that
+record nothing would prove Session 2 ran the same environment as Session 1.
+
 The harness env is **CPU-only and independent of SGLang**. SGLang itself is only
 installed where it is actually executed (a GPU host, or a separate local env for
 the CPU feasibility probe in Phase 2). This keeps analysis reproducible without
