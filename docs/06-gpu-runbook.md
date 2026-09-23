@@ -95,6 +95,36 @@ grep -c record_iteration \
 `HF_HOME` is inherited by every server the session launches, so weights are read
 from the volume rather than re-downloaded per launch.
 
+### 4b. Run the fork's unit tests (five minutes, and it verifies PR 1)
+
+SGLang's spec unit tests import torch, so they **cannot run on the Mac**. The host
+is the first place they can be executed, and doing it here means the upstream PR
+can be opened with verified tests rather than hopeful ones:
+
+```bash
+cd /workspace/sglang
+
+# PR 1: request identity on the policy feedback path
+python -m pytest -q test/registered/unit/spec/test_adaptive_runtime_state.py
+python -m pytest -q test/registered/unit/spec/test_adaptive_spec_params.py
+python -m pytest -q test/registered/unit/managers/test_batch_result_processor_spec_grammar.py
+
+# the trace patch (only present on heterospec/iter-telemetry)
+python -m pytest -q test/registered/unit/spec/test_heterospec_trace.py
+```
+
+All four are registered in CPU CI, so they need no GPU. If any fails, report the
+failure before running the session — the session's results are unaffected, but
+PR 1 must not be opened until its tests pass.
+
+Note that `heterospec/iter-telemetry` and `heterospec/policy-feedback-identity`
+are separate branches, so the two groups of tests need different checkouts:
+
+```bash
+git checkout heterospec/policy-feedback-identity   # PR 1 tests
+git checkout heterospec/iter-telemetry             # trace patch tests + the session
+```
+
 ## 5. Dry-run the plan (free, and worth doing)
 
 ```bash
