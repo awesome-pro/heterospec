@@ -58,6 +58,38 @@ the default cache location is fine.
 > or if RunPod's bandwidth from your chosen datacenter turns out to be slow. If
 > Session 1 says "pursue" and you find yourself running five more sessions, revisit
 > this — at 50 GB it is $3.50/month.
+### 1c. Where these settings actually live: "Edit template overrides"
+
+The deploy screen shows a summary, but the values are edited in the **Edit template
+overrides** dialog. Open it and change exactly one thing:
+
+| Field in the dialog | Action |
+| --- | --- |
+| **Container disk** | **31 → 100.** This is the one that must change |
+| Container image | leave it (`...cu1281-torch280-ubuntu2404` is fine — see below) |
+| SSH terminal access | **keep checked** — this is how you connect |
+| Start Jupyter notebook | optional; unchecking frees a little RAM |
+| Volume mount path (`/workspace`) | leave; irrelevant with no volume attached |
+| Exposed ports 8888 / 22 | leave |
+| Environment variables | leave empty — export `HF_HOME`/`HF_TOKEN` in the shell instead |
+
+Then click **Set overrides** and confirm the summary reads **Total disk 100 GB**
+before deploying.
+
+> **The container image's CUDA version does not need to be 13.** This corrects an
+> earlier over-strict claim of mine. I checked SGLang's dependency tree at the
+> session commit, and the CUDA 13 runtime arrives through **pip**, not the base
+> image: `torch==2.13.0`, `flashinfer_python[cu13]==0.6.18`,
+> `humming-kernels[cu13]==0.1.12`, `sglang-kernel==0.4.7`, plus
+> `nvidia-cudnn-cu13`, `nvidia-nccl-cu13`, `nvidia-nvshmem-cu13`. Torch links
+> against those bundled pip libraries, not the system toolkit, so a cu128 base
+> image is fine. What must support CUDA 13 is the **host driver**, and the deploy
+> screen offering CUDA 13.0/13.2 means it does.
+>
+> The pinned lockfile at `configs/env/sglang-py312-linux.lock` records this full
+> resolution. Phase 4 still prints the actual `torch` and CUDA versions it landed
+> on, so this is verified rather than assumed.
+
 **✅ Check:** the pod shows `Running` and "Total disk" reads **100 GB**. There is
 deliberately **no volume**, so the "Nothing mounted at the template's path"
 warning will still be visible — that is expected, ignore it. Once the pod is up,
